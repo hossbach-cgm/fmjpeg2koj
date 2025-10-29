@@ -67,7 +67,11 @@ OFBool DJPEG2KDecoderBase::canChangeCoding(
   // this codec only handles conversion from JPEG-2000 to uncompressed.
 
   DcmXfer newRep(newRepType);
+#if PACKAGE_VERSION_NUMBER > 368
+  if (newRep.usesNativeFormat() &&
+#else
   if (newRep.isNotEncapsulated() &&
+#endif
      ((oldRepType == EXS_JPEG2000LosslessOnly)||(oldRepType == EXS_JPEG2000)||
 	  (oldRepType == EXS_JPEG2000MulticomponentLosslessOnly)||(oldRepType == EXS_JPEG2000Multicomponent)))
      return OFTrue;
@@ -598,6 +602,23 @@ OFCondition DJPEG2KDecoderBase::determineDecompressedColorModel(
   }
   return result;
 }
+
+#if PACKAGE_VERSION_NUMBER > 369
+Uint16 DJPEG2KDecoderBase::decodedBitsAllocated(Uint16 bitsAllocated, Uint16 bitsStored) const
+{
+  // this codec does not support images with less than 2 bits per sample
+  if (bitsStored < 2) return 0;
+
+  // for images with 2..8 bits per sample, BitsAllocated will be 8
+  if (bitsStored <= 8) return 8;
+
+  // for images with 9..16 bits per sample, BitsAllocated will be 16
+  if (bitsStored <= 16) return 16;
+
+  // this codec does not support images with more than 16 bits per sample
+  return 0;
+}
+#endif
 
 
 Uint16 DJPEG2KDecoderBase::determinePlanarConfiguration(

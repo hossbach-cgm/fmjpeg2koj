@@ -103,7 +103,12 @@ OFBool DJPEG2KEncoderBase::canChangeCoding(
 {
 	// this codec only handles conversion from uncompressed to JPEG 2000.
 	DcmXfer oldRep(oldRepType);
+#if PACKAGE_VERSION_NUMBER > 368
+	return (oldRep.usesNativeFormat() && (newRepType == supportedTransferSyntax()));
+#else
 	return (oldRep.isNotEncapsulated() && (newRepType == supportedTransferSyntax()));
+#endif
+
 }
 
 
@@ -278,6 +283,13 @@ OFCondition DJPEG2KEncoderBase::determineDecompressedColorModel(
 {
 	return EC_IllegalCall;
 }
+
+#if PACKAGE_VERSION_NUMBER > 369
+Uint16 DJPEG2KEncoderBase::decodedBitsAllocated(Uint16 bitsAllocated, Uint16 bitsStored) const
+{
+	return 0;
+}
+#endif
 
 
 OFCondition DJPEG2KEncoderBase::adjustOverlays(

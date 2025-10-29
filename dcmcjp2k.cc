@@ -386,7 +386,11 @@ LICENSE_FILE_EVALUATE_COMMAND_LINE_OPTIONS
     DcmDataset *dataset = fileformat.getDataset();
 
     DcmXfer original_xfer(dataset->getOriginalXfer());
+#if PACKAGE_VERSION_NUMBER > 368
+    if (original_xfer.usesEncapsulatedFormat() && original_xfer.isPixelDataCompressed())
+#else
     if (original_xfer.isEncapsulated())
+#endif
     {
       OFLOG_INFO(fmjp2kLogger, "DICOM file is already compressed, converting to uncompressed transfer syntax first");
       if (EC_Normal != dataset->chooseRepresentation(EXS_LittleEndianExplicit, NULL))

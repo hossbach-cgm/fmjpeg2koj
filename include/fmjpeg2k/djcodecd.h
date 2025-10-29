@@ -248,6 +248,19 @@ public:
     DcmItem *dataset,
     OFString &decompressedColorModel) const;
 
+#if PACKAGE_VERSION_NUMBER > 369
+  /** determines the effective value of BitsAllocated that a dataset will have
+   *  after decompression of an image with the given values for bitsAllocated
+   *  and bitsStored. This may differ from the bitsAllocated parameter for example
+   *  if that value is not a multiple of 8. Returns zero if an image with the
+   *  given parameters cannot be decoded with this codec.
+   *  @param bitsAllocated current value of Bits Allocated
+   *  @param bitsStored current value of Bits Stored
+   *  @return value of BitsAllocated after decompression, 0 if no decompression possible
+   */
+  Uint16 decodedBitsAllocated(Uint16 bitsAllocated, Uint16 bitsStored) const override;
+#endif
+
 private:
 
   // static private helper methods
@@ -387,7 +400,6 @@ private:
  */
 class FMJPEG2K_EXPORT DJPEG2KDecoder : public DJPEG2KDecoderBase
 {
-
 };
 
 #endif
