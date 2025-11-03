@@ -102,13 +102,13 @@ OFBool DJPEG2KEncoderBase::canChangeCoding(
 	const E_TransferSyntax newRepType) const
 {
 	// this codec only handles conversion from uncompressed to JPEG 2000.
-	DcmXfer oldRep(oldRepType);
-#if PACKAGE_VERSION_NUMBER > 368
-	return (oldRep.usesNativeFormat() && (newRepType == supportedTransferSyntax()));
-#else
-	return (oldRep.isNotEncapsulated() && (newRepType == supportedTransferSyntax()));
-#endif
+	const bool oldIsUncompressed =
+		oldRepType == EXS_LittleEndianExplicit ||
+		oldRepType == EXS_LittleEndianImplicit;
 
+	const bool newIsThisEncoder = (newRepType == supportedTransferSyntax());
+
+	return (oldIsUncompressed && newIsThisEncoder) ? OFTrue : OFFalse;
 }
 
 
