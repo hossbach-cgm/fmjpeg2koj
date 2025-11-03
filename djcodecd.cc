@@ -87,7 +87,11 @@ OFCondition DJPEG2KDecoderBase::decode(
     const DcmCodecParameter* codecparam,
     const DcmStack& objStack) const
 {
-    if (!pixSeq) return EC_IllegalParameter;
+    if (!pixSeq)
+    {
+        FMJPEG2K_DEBUG("DJPEG2KDecoderBase::decode: Invalid pixel sequence");
+        return EC_IllegalParameter;
+    }
 
     // retrieve pointer to dataset from parameter stack
     DcmStack localStack(objStack);
@@ -276,6 +280,18 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
 {
     OFCondition result = EC_Normal;
 
+    if (!fromPixSeq || !buffer)
+    {
+        return EC_IllegalParameter;
+    }
+
+    const Uint32 numItems = fromPixSeq->card();
+    if (numItems < 2)
+    {
+        FMJPEG2K_WARN("JPEG-2000 pixel sequence contains no image data");
+        return EC_CorruptedData;
+    }
+
     // assume we can cast the codec parameter to what we need
     const DJPEG2KCodecParameter* djcp = OFreinterpret_cast(const DJPEG2KCodecParameter*, cp);
 
@@ -302,25 +318,35 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
     //we only support up to 16 bits per sample
     if ((imageBitsStored < 1) || (imageBitsStored > 16)) return EC_J2KUnsupportedBitDepth;
 
-    // determine the number of bytes per sample (bits allocated) for the de-compressed object.
-    Uint16 bytesPerSample = 1;
-    if (imageBitsStored > 8) bytesPerSample = 2;
-    else if (imageBitsAllocated > 8) bytesPerSample = 2;
+    const Uint16 bytesPerSample = (imageBitsAllocated > 8) ? 2 : 1;
 
-    // number of frames is an optional attribute - we don't mind if it isn't present.
-    Sint32 imageFrames = 0;
-    dataset->findAndGetSint32(DCM_NumberOfFrames, imageFrames).good();
-
-    if (imageFrames >= OFstatic_cast(Sint32, fromPixSeq->card()))
-        imageFrames = fromPixSeq->card() - 1; // limit number of frames to number of pixel items - 1
-    if (imageFrames < 1)
-        imageFrames = 1; // default in case the number of frames attribute is absent or contains garbage
-
-    // if the user has provided this information, we trust him.
-    // If the user has passed a zero, try to find out ourselves.
-    if (currentItem == 0)
+    const uint64_t pixels = uint64_t(imageRows) * uint64_t(imageColumns);
+    const uint64_t bytesPerFrame = uint64_t(bytesPerSample) * pixels * uint64_t(imageSamplesPerPixel);
+    if (bytesPerFrame == 0 || bytesPerFrame > std::numeric_limits<Uint32>::max())
     {
+        FMJPEG2K_WARN("Decompressed image size is unreasonably large");
+        return EC_MemoryExhausted;
+    }
+    if (bytesPerFrame > bufSize)
+    {
+        return EC_InvalidStream; // buffer too small
+    }
+
+    Sint32 imageFrames = 0;
+    (void)dataset->findAndGetSint32(DCM_NumberOfFrames, imageFrames);
+    if (imageFrames >= OFstatic_cast(Sint32, numItems)) 
+    {
+        imageFrames = numItems - 1;
+    }
+    if (imageFrames < 1) 
+    {
+        imageFrames = 1;
+    }
+
+    if (currentItem == 0) {
         result = determineStartFragment(frameNo, imageFrames, fromPixSeq, currentItem);
+        if (result.bad()) return result;
+        if (currentItem == 0) return EC_CorruptedData; // must not be BOT
     }
 
     if (result.good())
@@ -331,10 +357,31 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
             imageFrames, imageColumns, imageRows, imageSamplesPerPixel, bytesPerSample);
     }
 
-    if (result.good())
-    {
-        // retrieve color model from given dataset
-        result = dataset->findAndGetOFString(DCM_PhotometricInterpretation, decompressedColorModel);
+    auto isValidPI = [](const OFString& s) {
+        static const char* k[] = {
+            "MONOCHROME1","MONOCHROME2","RGB","PALETTE COLOR",
+            "YBR_FULL","YBR_FULL_422","YBR_PARTIAL_422","YBR_ICT","YBR_RCT"
+        };
+        for (auto v : k) if (s == v) return true;
+        return false;
+        };
+
+    OFString pi;
+    if (dataset->findAndGetOFString(DCM_PhotometricInterpretation, pi).good() && isValidPI(pi)) {
+        decompressedColorModel = pi;
+    }
+    else {
+        // infer a sane local default without modifying the dataset
+        const OFBool hasPalette =
+            dataset->tagExistsWithValue(DCM_RedPaletteColorLookupTableData) ||
+            dataset->tagExistsWithValue(DCM_GreenPaletteColorLookupTableData) ||
+            dataset->tagExistsWithValue(DCM_BluePaletteColorLookupTableData);
+
+        if (hasPalette)          decompressedColorModel = "PALETTE COLOR";
+        else if (imageSamplesPerPixel == 3) decompressedColorModel = "RGB";
+        else                      decompressedColorModel = "MONOCHROME2";
+
+        FMJPEG2K_WARN("PI missing/invalid; using inferred color model: " << decompressedColorModel);
     }
 
     return result;
@@ -378,6 +425,11 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
     Uint16 imageSamplesPerPixel,
     Uint16 bytesPerSample)
 {
+    if (!cp)
+    {
+        return EC_IllegalParameter;
+    }
+
     DcmPixelItem* pixItem = NULL;
     Uint8* jlsData = NULL;
     Uint8* jlsFragmentData = NULL;
@@ -435,8 +487,14 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
             if (result.good() && pixItem)
             {
                 fragmentLength = pixItem->getLength();
-                if (result.good())
+                if (result.good()) 
+                {
+                    if (compressedSize + fragmentLength < compressedSize) 
+                    {
+                        return EC_MemoryExhausted;
+                    }
                     compressedSize += fragmentLength;
+                }
             }
         } /* while */
     }
@@ -444,30 +502,47 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
     // get the compressed data
     if (result.good())
     {
-        Uint32 offset = 0;
-        jlsData = new Uint8[compressedSize];
-
-        while (result.good() && fragmentsForThisFrame--)
+        if (compressedSize == 0) 
         {
+            return EC_CorruptedData;
+        }
+
+        jlsData = new (std::nothrow) Uint8[compressedSize];
+        if (!jlsData)
+        {
+            return EC_MemoryExhausted;
+        }
+
+        Uint32 offset = 0;
+        while (result.good() && fragmentsForThisFrame--) {
             result = fromPixSeq->getItem(pixItem, currentItem++);
-            if (result.good() && pixItem)
-            {
+            if (result.good() && pixItem) {
                 fragmentLength = pixItem->getLength();
                 result = pixItem->getUint8Array(jlsFragmentData);
-                if (result.good() && jlsFragmentData)
-                {
-                    memcpy(&jlsData[offset], jlsFragmentData, fragmentLength);
+                if (result.good() && jlsFragmentData) {
+                    // prevent overflow into the destination buffer
+                    if (offset > compressedSize - fragmentLength) {
+                        delete[] jlsData;
+                        return EC_CorruptedData;
+                    }
+                    memcpy(jlsData + offset, jlsFragmentData, fragmentLength);
                     offset += fragmentLength;
                 }
             }
-        } /* while */
+        }
+
+        // early cleanup on failure or size mismatch
+        if (result.bad()) { delete[] jlsData; return result; }
+        if (offset != compressedSize) { delete[] jlsData; return EC_CorruptedData; }
     }
 
     if (result.good())
     {
-        // see if the last byte is a padding, otherwise, it should be 0xd9
-        if (jlsData[compressedSize - 1] == 0)
-            compressedSize--;
+        if (compressedSize > 0 && jlsData[compressedSize - 1] == 0) {
+            // DICOM encapsulated fragments are padded to even length; a trailing 0x00 is padding.
+            --compressedSize;
+            if (compressedSize == 0) { delete[] jlsData; return EC_CorruptedData; }
+        }
 
         DecodeData mysrc((unsigned char*)jlsData, compressedSize);
 
@@ -478,6 +553,7 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
         opj_image_t* image = NULL;
 
         l_stream = opj_stream_create_memory_stream(&mysrc, OPJ_J2K_STREAM_CHUNK_SIZE, true);
+        if (!l_stream) { delete[] jlsData; return EC_MemoryExhausted; }
 
         // figure out codec
 #define JP2_RFC3745_MAGIC "\x00\x00\x00\x0c\x6a\x50\x20\x20\x0d\x0a\x87\x0a"
@@ -486,14 +562,17 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
 #define J2K_CODESTREAM_MAGIC "\xff\x4f\xff\x51"
 
         OPJ_CODEC_FORMAT format = OPJ_CODEC_UNKNOWN;
-        if (memcmp(jlsData, JP2_RFC3745_MAGIC, 12) == 0 || memcmp(jlsData, JP2_MAGIC, 4) == 0)
+        if (compressedSize >= 12 && memcmp(jlsData, JP2_RFC3745_MAGIC, 12) == 0)
             format = OPJ_CODEC_JP2;
-        else if (memcmp(jlsData, J2K_CODESTREAM_MAGIC, 4) == 0)
+        else if (compressedSize >= 4 && (memcmp(jlsData, JP2_MAGIC, 4) == 0))
+            format = OPJ_CODEC_JP2;
+        else if (compressedSize >= 4 && memcmp(jlsData, J2K_CODESTREAM_MAGIC, 4) == 0)
             format = OPJ_CODEC_J2K;
         else
             format = OPJ_CODEC_J2K;
 
         l_codec = opj_create_decompress(format);
+        if (!l_codec) { opj_stream_destroy(l_stream); delete[] jlsData; return EC_MemoryExhausted; }
 
         opj_set_info_handler(l_codec, msg_callback, NULL);
         opj_set_warning_handler(l_codec, msg_callback, NULL);
@@ -525,6 +604,14 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
             //else if ((bytesPerSample == 2) && (image->bitspersample <= 8)) result = EC_J2KImageDataMismatch;
         }
 
+        // validate component precision vs bytesPerSample
+        const int prec0 = image->comps[0].prec;  // bits per sample as reported by OpenJPEG
+        if ((bytesPerSample == 1 && prec0 > 8) || (bytesPerSample == 2 && prec0 <= 8)) {
+            opj_stream_destroy(l_stream); opj_destroy_codec(l_codec); opj_image_destroy(image);
+            delete[] jlsData;
+            return EC_J2KImageDataMismatch;
+        }
+
         if (!result.good())
         {
             delete[] jlsData;
@@ -540,24 +627,33 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
 
             if (result.good())
             {
-                // copy the image depending on planer configuration and bits
-                if (image->numcomps == 1)	// Greyscale
-                {
-                    if (image->comps[0].prec <= 8)
-                        copyUint32ToUint8(image, OFreinterpret_cast(Uint8*, buffer), imageColumns, imageRows);
-                    if (image->comps[0].prec > 8)
-                        copyUint32ToUint16(image, OFreinterpret_cast(Uint16*, buffer), imageColumns, imageRows);
+
+                if (image->numcomps == 1) {
+                    if (prec0 <= 8) {
+                        result = copyUint32ToUint8(image, OFreinterpret_cast(Uint8*, buffer), imageColumns, imageRows);
+                    }
+                    else {
+                        result = copyUint32ToUint16(image, OFreinterpret_cast(Uint16*, buffer), imageColumns, imageRows);
+                    }
                 }
-                else if (image->numcomps == 3)
-                {
-                    if (imagePlanarConfiguration == 0)
-                    {
-                        copyRGBUint8ToRGBUint8(image, OFreinterpret_cast(Uint8*, buffer), imageColumns, imageRows);
+                else if (image->numcomps == 3) {
+                    const int prec0 = image->comps[0].prec;
+                    if (image->numcomps == 3 && prec0 > 8) {
+                        opj_stream_destroy(l_stream); opj_destroy_codec(l_codec); opj_image_destroy(image);
+                        delete[] jlsData;
+                        return EC_J2KUnsupportedBitDepth;
                     }
-                    else if (imagePlanarConfiguration == 1)
-                    {
-                        copyRGBUint8ToRGBUint8Planar(image, OFreinterpret_cast(Uint8*, buffer), imageColumns, imageRows);
+                    if (imagePlanarConfiguration == 0) {
+                        result = copyRGBUint8ToRGBUint8(image, OFreinterpret_cast(Uint8*, buffer), imageColumns, imageRows);
                     }
+                    else {
+                        result = copyRGBUint8ToRGBUint8Planar(image, OFreinterpret_cast(Uint8*, buffer), imageColumns, imageRows);
+                    }
+                }
+                if (result.bad()) {
+                    opj_stream_destroy(l_stream); opj_destroy_codec(l_codec); opj_image_destroy(image);
+                    delete[] jlsData;
+                    return result;
                 }
             }
 
@@ -791,7 +887,6 @@ Uint32 DJPEG2KDecoderBase::computeNumberOfFragments(
     // We're bust. No way to determine the number of fragments per frame.
     return 0;
 }
-
 
 OFBool DJPEG2KDecoderBase::isJPEGLSStartOfImage(Uint8* fragmentData)
 {
