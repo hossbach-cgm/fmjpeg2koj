@@ -193,11 +193,24 @@ OFCondition DJPEG2KDecoderBase::decode(
     dataset->findAndGetOFString(DCM_PhotometricInterpretation, imagePhotometricInterpretation);
 
     // allocate space for uncompressed pixel data element
-    Uint16* pixeldata16 = NULL;
-    OFCondition result = uncompressedPixelData.createUint16Array(totalSize / sizeof(Uint16), pixeldata16);
+    Uint8* base8 = NULL;
+    Uint16* base16 = NULL;
+    OFCondition result;
+
+    if (bytesPerSample == 1) {
+        // OB: exact byte size
+        result = uncompressedPixelData.createUint8Array(totalSize, base8);
+    }
+    else {
+        // OW: words
+        result = uncompressedPixelData.createUint16Array(totalSize / sizeof(Uint16), base16);
+        base8 = OFreinterpret_cast(Uint8*, base16); // nur für Pointerarithmetik weiter unten
+    }
     if (result.bad()) return result;
 
-    Uint8* pixeldata8 = OFreinterpret_cast(Uint8*, pixeldata16);
+    // use a single write pointer; DO NOT redeclare pixeldata8 again
+    Uint8* pixeldata8 = base8;
+
     Sint32 currentFrame = 0;
     Uint32 currentItem = 1; // item 0 contains the offset table
     OFBool done = OFFalse;
@@ -222,6 +235,12 @@ OFCondition DJPEG2KDecoderBase::decode(
         // nothing could be decoded at all
         FMJPEG2K_WARN("No JPEG-2000 frames could be decoded");
         return EC_CorruptedData;
+    }
+
+    // final byte swap only for 16-bit
+    if (result.good() && bytesPerSample == 2) {
+        result = swapIfNecessary(gLocalByteOrder, EBO_LittleEndian, base16,
+            totalSize, sizeof(Uint16));
     }
 
     // mismatch is common in the wild; do not fail hard
@@ -587,12 +606,24 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
             result = EC_CorruptedData;
         }
 
-        if (result.good() && !opj_read_header(l_stream, l_codec, &image))
+        if(result.good()) 
         {
-            opj_stream_destroy(l_stream); l_stream = NULL;
-            opj_destroy_codec(l_codec); l_codec = NULL;
-            opj_image_destroy(image); image = NULL;
-            result = EC_CorruptedData;
+            const OPJ_BOOL ok = opj_read_header(l_stream, l_codec, &image);
+            if (ok != OPJ_TRUE || image == nullptr) {
+                if (l_stream) opj_stream_destroy(l_stream), l_stream = NULL;
+                if (l_codec)  opj_destroy_codec(l_codec), l_codec = NULL;
+                if (image)    opj_image_destroy(image), image = NULL;
+                delete[] jlsData;
+                return EC_CorruptedData;
+            }
+        }
+        else 
+        {
+            if (l_stream) opj_stream_destroy(l_stream), l_stream = NULL;
+            if (l_codec)  opj_destroy_codec(l_codec), l_codec = NULL;
+            if (image)    opj_image_destroy(image), image = NULL;
+            delete[] jlsData;
+            return result;
         }
 
         if (result.good())
@@ -602,6 +633,22 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
             else if (image->numcomps != imageSamplesPerPixel) result = EC_J2KImageDataMismatch;
             //else if ((bytesPerSample == 1) && (image->bitspersample > 8)) result = EC_J2KImageDataMismatch;
             //else if ((bytesPerSample == 2) && (image->bitspersample <= 8)) result = EC_J2KImageDataMismatch;
+        }
+
+        // bail out early if header mismatch
+        if (!result.good()) {
+            opj_stream_destroy(l_stream); l_stream = NULL;
+            opj_destroy_codec(l_codec);   l_codec = NULL;
+            opj_image_destroy(image);     image = NULL;
+            delete[] jlsData;
+            return result;
+        }
+
+        // validate we have at least one component before touching comps[0]
+        if (image->numcomps < 1) {
+            opj_stream_destroy(l_stream); opj_destroy_codec(l_codec); opj_image_destroy(image);
+            delete[] jlsData;
+            return EC_CorruptedData;
         }
 
         // validate component precision vs bytesPerSample
@@ -627,27 +674,35 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
 
             if (result.good())
             {
+                // Validate component geometry before copying to the destination buffer.
+                auto comp_has_full_res = [&](const opj_image_t* img, int c,
+                    Uint16 cols, Uint16 rows) -> bool {
+                        const opj_image_comp_t& comp = img->comps[c];
+                        // No subsampling
+                        if (comp.dx != 1 || comp.dy != 1) return false;
+                        // Component plane dimensions must match requested image size
+                        if ((int)comp.w != (int)cols || (int)comp.h != (int)rows) return false;
+                        // Data pointer must be present
+                        if (!comp.data) return false;
+                        return true;
+                    };
 
+                // For grayscale
                 if (image->numcomps == 1) {
-                    if (prec0 <= 8) {
-                        result = copyUint32ToUint8(image, OFreinterpret_cast(Uint8*, buffer), imageColumns, imageRows);
-                    }
-                    else {
-                        result = copyUint32ToUint16(image, OFreinterpret_cast(Uint16*, buffer), imageColumns, imageRows);
-                    }
-                }
-                else if (image->numcomps == 3) {
-                    const int prec0 = image->comps[0].prec;
-                    if (image->numcomps == 3 && prec0 > 8) {
+                    if (!comp_has_full_res(image, 0, imageColumns, imageRows)) {
                         opj_stream_destroy(l_stream); opj_destroy_codec(l_codec); opj_image_destroy(image);
                         delete[] jlsData;
-                        return EC_J2KUnsupportedBitDepth;
+                        return EC_J2KImageDataMismatch;
                     }
-                    if (imagePlanarConfiguration == 0) {
-                        result = copyRGBUint8ToRGBUint8(image, OFreinterpret_cast(Uint8*, buffer), imageColumns, imageRows);
-                    }
-                    else {
-                        result = copyRGBUint8ToRGBUint8Planar(image, OFreinterpret_cast(Uint8*, buffer), imageColumns, imageRows);
+                }
+                // For RGB
+                if (image->numcomps == 3) {
+                    for (int c = 0; c < 3; ++c) {
+                        if (!comp_has_full_res(image, c, imageColumns, imageRows)) {
+                            opj_stream_destroy(l_stream); opj_destroy_codec(l_codec); opj_image_destroy(image);
+                            delete[] jlsData;
+                            return EC_J2KImageDataMismatch;
+                        }
                     }
                 }
                 if (result.bad()) {
@@ -661,16 +716,6 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
             opj_destroy_codec(l_codec); l_codec = NULL;
             opj_image_destroy(image); image = NULL;
             delete[] jlsData;
-
-            if (result.good())
-            {
-                // decompression is complete, finally adjust byte order if necessary
-                if (bytesPerSample == 1) // we're writing bytes into words
-                {
-                    result = swapIfNecessary(gLocalByteOrder, EBO_LittleEndian, buffer,
-                        bufSize, sizeof(Uint16));
-                }
-            }
         }
     }
 
@@ -871,9 +916,10 @@ Uint32 DJPEG2KDecoderBase::computeNumberOfFragments(
         {
             fragmentData = NULL;
             result = pixItem->getUint8Array(fragmentData);
+            const auto fragmentLength = pixItem->getLength();
             if (result.good() && fragmentData && (pixItem->getLength() > 3))
             {
-                if (isJPEGLSStartOfImage(fragmentData))
+                if (isJ2KStart(fragmentData, fragmentLength))
                 {
                     // found a JPEG-2000 SOI marker. Assume that this is the start of the next frame.
                     return (nextItem - startItem);
@@ -888,143 +934,161 @@ Uint32 DJPEG2KDecoderBase::computeNumberOfFragments(
     return 0;
 }
 
-OFBool DJPEG2KDecoderBase::isJPEGLSStartOfImage(Uint8* fragmentData)
+// Detects the beginning of a JPEG-2000 codestream or JP2 file.
+// Returns true if the buffer starts with either the SOC marker (0xFF4F)
+// or the JP2 signature box (00 00 00 0C 6A 50 20 20 0D 0A 87 0A).
+OFBool DJPEG2KDecoderBase::isJ2KStart(const Uint8* data, Uint32 length)
 {
-    // A valid JPEG-2000 bitstream will always start with an SOI marker FFD8, followed
-    // by either an SOF55 (FFF7), COM (FFFE) or APPn (FFE0-FFEF) marker.
-    if ((*fragmentData++) != 0xFF) return OFFalse;
-    if ((*fragmentData++) != 0xD8) return OFFalse;
-    if ((*fragmentData++) != 0xFF) return OFFalse;
-    if ((*fragmentData == 0xF7) || (*fragmentData == 0xFE) || ((*fragmentData & 0xF0) == 0xE0))
-    {
+    if (!data || length < 2)
+        return OFFalse;
+
+    // Case 1: raw codestream (.j2k / .j2c)
+    if (data[0] == 0xFF && data[1] == 0x4F)
         return OFTrue;
-    }
+
+    // Case 2: JP2 file with signature box
+    if (length >= 12 &&
+        data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x00 && data[3] == 0x0C &&
+        data[4] == 0x6A && data[5] == 0x50 && data[6] == 0x20 && data[7] == 0x20 &&
+        data[8] == 0x0D && data[9] == 0x0A && data[10] == 0x87 && data[11] == 0x0A)
+        return OFTrue;
+
     return OFFalse;
 }
 
+// Put this helper near the top of the file or just above the planar functions.
+static inline bool safe_mul_add_size(size_t a, size_t b, size_t c, size_t& out)
+{
+    if (a && b > SIZE_MAX / a) return false;
+    size_t ab = a * b;
+    if (c > SIZE_MAX - ab) return false;
+    out = ab + c;
+    return true;
+}
 
+// --- Byte variant (planarConfiguration = 1) ---
 OFCondition DJPEG2KDecoderBase::createPlanarConfiguration1Byte(
-    Uint8* imageFrame,
-    Uint16 columns,
-    Uint16 rows)
+    Uint8* imageFrame, Uint16 columns, Uint16 rows)
 {
-    if (imageFrame == NULL) return EC_IllegalCall;
-
-    unsigned long numPixels = columns * rows;
+    if (!imageFrame) return EC_IllegalCall;
+    const size_t numPixels = static_cast<size_t>(columns) * static_cast<size_t>(rows);
     if (numPixels == 0) return EC_IllegalCall;
 
-    Uint8* buf = new Uint8[3 * numPixels + 3];
-    if (buf)
-    {
-        memcpy(buf, imageFrame, (size_t)(3 * numPixels));
-        Uint8* s = buf;                        // source
-        Uint8* r = imageFrame;                 // red plane
-        Uint8* g = imageFrame + numPixels;     // green plane
-        Uint8* b = imageFrame + (2 * numPixels); // blue plane
-        for (unsigned long i = numPixels; i; i--)
-        {
-            *r++ = *s++;
-            *g++ = *s++;
-            *b++ = *s++;
-        }
-        delete[] buf;
-    }
-    else return EC_MemoryExhausted;
+    size_t elemCount = 0;
+    if (!safe_mul_add_size(/*a=*/3, /*b=*/numPixels, /*c=*/3, /*out=*/elemCount))
+        return EC_MemoryExhausted;
+
+    std::unique_ptr<Uint8[]> buf(new(std::nothrow) Uint8[elemCount]);
+    if (!buf) return EC_MemoryExhausted;
+
+    const size_t bytesToCopy = numPixels * 3u; // 3 components, 1 byte each
+    // bytesToCopy fits because elemCount >= 3*numPixels by construction
+    memcpy(buf.get(), imageFrame, bytesToCopy);
+
+    Uint8* s = buf.get();                 // source (interleaved RGB)
+    Uint8* r = imageFrame;                // R plane
+    Uint8* g = imageFrame + numPixels;    // G plane
+    Uint8* b = imageFrame + 2 * numPixels;// B plane
+    for (size_t i = numPixels; i; --i) { *r++ = *s++; *g++ = *s++; *b++ = *s++; }
     return EC_Normal;
 }
 
-
+// --- Word variant (planarConfiguration = 1) ---
 OFCondition DJPEG2KDecoderBase::createPlanarConfiguration1Word(
-    Uint16* imageFrame,
-    Uint16 columns,
-    Uint16 rows)
+    Uint16* imageFrame, Uint16 columns, Uint16 rows)
 {
-    if (imageFrame == NULL) return EC_IllegalCall;
-
-    unsigned long numPixels = columns * rows;
+    if (!imageFrame) return EC_IllegalCall;
+    const size_t numPixels = static_cast<size_t>(columns) * static_cast<size_t>(rows);
     if (numPixels == 0) return EC_IllegalCall;
 
-    Uint16* buf = new Uint16[3 * numPixels + 3];
-    if (buf)
-    {
-        memcpy(buf, imageFrame, (size_t)(3 * numPixels * sizeof(Uint16)));
-        Uint16* s = buf;                        // source
-        Uint16* r = imageFrame;                 // red plane
-        Uint16* g = imageFrame + numPixels;     // green plane
-        Uint16* b = imageFrame + (2 * numPixels); // blue plane
-        for (unsigned long i = numPixels; i; i--)
-        {
-            *r++ = *s++;
-            *g++ = *s++;
-            *b++ = *s++;
-        }
-        delete[] buf;
-    }
-    else return EC_MemoryExhausted;
+    size_t elemCount = 0;
+    if (!safe_mul_add_size(3, numPixels, 3, elemCount))
+        return EC_MemoryExhausted;
+
+    std::unique_ptr<Uint16[]> buf(new(std::nothrow) Uint16[elemCount]);
+    if (!buf) return EC_MemoryExhausted;
+
+    // bytes to copy = 3 * numPixels * sizeof(Uint16); check for overflow
+    size_t trip = 0;
+    if (!safe_mul_add_size(3, numPixels, 0, trip)) return EC_MemoryExhausted;
+    if (trip > SIZE_MAX / sizeof(Uint16)) return EC_MemoryExhausted;
+    const size_t bytesToCopy = trip * sizeof(Uint16);
+
+    memcpy(buf.get(), imageFrame, bytesToCopy);
+
+    Uint16* s = buf.get();
+    Uint16* r = imageFrame;
+    Uint16* g = imageFrame + numPixels;
+    Uint16* b = imageFrame + 2 * numPixels;
+    for (size_t i = numPixels; i; --i) { *r++ = *s++; *g++ = *s++; *b++ = *s++; }
     return EC_Normal;
 }
 
+// --- Byte variant (planarConfiguration = 0) ---
 OFCondition DJPEG2KDecoderBase::createPlanarConfiguration0Byte(
-    Uint8* imageFrame,
-    Uint16 columns,
-    Uint16 rows)
+    Uint8* imageFrame, Uint16 columns, Uint16 rows)
 {
-    if (imageFrame == NULL) return EC_IllegalCall;
-
-    unsigned long numPixels = columns * rows;
+    if (!imageFrame) return EC_IllegalCall;
+    const size_t numPixels = static_cast<size_t>(columns) * static_cast<size_t>(rows);
     if (numPixels == 0) return EC_IllegalCall;
 
-    Uint8* buf = new Uint8[3 * numPixels + 3];
-    if (buf)
-    {
-        memcpy(buf, imageFrame, (size_t)(3 * numPixels));
-        Uint8* t = imageFrame;          // target
-        Uint8* r = buf;                 // red plane
-        Uint8* g = buf + numPixels;     // green plane
-        Uint8* b = buf + (2 * numPixels); // blue plane
-        for (unsigned long i = numPixels; i; i--)
-        {
-            *t++ = *r++;
-            *t++ = *g++;
-            *t++ = *b++;
-        }
-        delete[] buf;
-    }
-    else return EC_MemoryExhausted;
+    size_t elemCount = 0;
+    if (!safe_mul_add_size(3, numPixels, 3, elemCount))
+        return EC_MemoryExhausted;
+
+    std::unique_ptr<Uint8[]> buf(new(std::nothrow) Uint8[elemCount]);
+    if (!buf) return EC_MemoryExhausted;
+
+    const size_t bytesToCopy = numPixels * 3u;
+    memcpy(buf.get(), imageFrame, bytesToCopy);
+
+    Uint8* t = imageFrame;           // target (interleaved)
+    Uint8* r = buf.get();            // R plane
+    Uint8* g = buf.get() + numPixels;// G plane
+    Uint8* b = buf.get() + 2 * numPixels;// B plane
+    for (size_t i = numPixels; i; --i) { *t++ = *r++; *t++ = *g++; *t++ = *b++; }
     return EC_Normal;
 }
 
-
+// --- Word variant (planarConfiguration = 0) ---
 OFCondition DJPEG2KDecoderBase::createPlanarConfiguration0Word(
-    Uint16* imageFrame,
-    Uint16 columns,
-    Uint16 rows)
+    Uint16* imageFrame, Uint16 columns, Uint16 rows)
 {
-    if (imageFrame == NULL) return EC_IllegalCall;
-
-    unsigned long numPixels = columns * rows;
+    if (!imageFrame) return EC_IllegalCall;
+    const size_t numPixels = static_cast<size_t>(columns) * static_cast<size_t>(rows);
     if (numPixels == 0) return EC_IllegalCall;
 
-    Uint16* buf = new Uint16[3 * numPixels + 3];
-    if (buf)
-    {
-        memcpy(buf, imageFrame, (size_t)(3 * numPixels * sizeof(Uint16)));
-        Uint16* t = imageFrame;          // target
-        Uint16* r = buf;                 // red plane
-        Uint16* g = buf + numPixels;     // green plane
-        Uint16* b = buf + (2 * numPixels); // blue plane
-        for (unsigned long i = numPixels; i; i--)
-        {
-            *t++ = *r++;
-            *t++ = *g++;
-            *t++ = *b++;
-        }
-        delete[] buf;
-    }
-    else return EC_MemoryExhausted;
+    size_t elemCount = 0;
+    if (!safe_mul_add_size(3, numPixels, 3, elemCount))
+        return EC_MemoryExhausted;
+
+    std::unique_ptr<Uint16[]> buf(new(std::nothrow) Uint16[elemCount]);
+    if (!buf) return EC_MemoryExhausted;
+
+    size_t trip = 0;
+    if (!safe_mul_add_size(3, numPixels, 0, trip)) return EC_MemoryExhausted;
+    if (trip > SIZE_MAX / sizeof(Uint16)) return EC_MemoryExhausted;
+    const size_t bytesToCopy = trip * sizeof(Uint16);
+
+    memcpy(buf.get(), imageFrame, bytesToCopy);
+
+    Uint16* t = imageFrame;           // target (interleaved)
+    Uint16* r = buf.get();
+    Uint16* g = buf.get() + numPixels;
+    Uint16* b = buf.get() + 2 * numPixels;
+    for (size_t i = numPixels; i; --i) { *t++ = *r++; *t++ = *g++; *t++ = *b++; }
     return EC_Normal;
 }
 
+static inline Uint8 clampToUint8(OPJ_INT32 v)
+{
+    return (v < 0) ? 0 : (v > 255 ? 255 : static_cast<Uint8>(v));
+}
+
+static inline Uint16 clampToUint16(OPJ_INT32 v)
+{
+    return (v < 0) ? 0 : (v > 65535 ? 65535 : static_cast<Uint16>(v));
+}
 
 OFCondition copyUint32ToUint8(
     opj_image_t* image,
@@ -1041,7 +1105,7 @@ OFCondition copyUint32ToUint8(
     OPJ_INT32* g = image->comps[0].data;   // grey plane  
     for (unsigned long i = numPixels; i; i--)
     {
-        *t++ = *g++;
+        *t++ = clampToUint8(*g++);
     }
 
     return EC_Normal;
@@ -1062,7 +1126,7 @@ OFCondition copyUint32ToUint16(
     OPJ_INT32* g = image->comps[0].data;   // grey plane  
     for (unsigned long i = numPixels; i; i--)
     {
-        *t++ = *g++;
+        *t++ = clampToUint16(*g++);
     }
 
     return EC_Normal;
@@ -1085,9 +1149,9 @@ OFCondition copyRGBUint8ToRGBUint8(
     OPJ_INT32* b = image->comps[2].data; // blue plane
     for (unsigned long i = numPixels; i; i--)
     {
-        *t++ = *r++;
-        *t++ = *g++;
-        *t++ = *b++;
+        *t++ = clampToUint8(*r++);
+        *t++ = clampToUint8(*g++);
+        *t++ = clampToUint8(*b++);
     }
 
     return EC_Normal;
@@ -1110,7 +1174,7 @@ OFCondition copyRGBUint8ToRGBUint8Planar(
         OPJ_INT32* r = image->comps[j].data; // color plane  
         for (unsigned long i = numPixels; i; i--)
         {
-            *t++ = *r++;
+            *t++ = clampToUint8(*r++);
         }
     }
     return EC_Normal;

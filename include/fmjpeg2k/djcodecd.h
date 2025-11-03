@@ -337,11 +337,12 @@ private:
 
   /** check whether the given buffer contains a JPEG-2000 start-of-image code
    *  @param fragmentData pointer to 4 or more bytes of JPEG-2000 data
+   *  @param length length of the data buffer in bytes
    *  @returns true if the first four bytes of the code stream indicate that
    *     this fragment is the start of a new JPEG-2000 image, i.e. starts with
    *     an SOI marker followed by SOF, COM or APPn.
    */
-  static OFBool isJPEGLSStartOfImage(Uint8 *fragmentData);
+  static OFBool isJ2KStart(const Uint8* data, Uint32 length);
 
   /** converts an RGB or YBR frame with 8 bits/sample from
    *  color-by-pixel to color-by-plane planar configuration.
