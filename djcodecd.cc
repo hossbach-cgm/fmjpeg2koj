@@ -154,7 +154,7 @@ OFCondition DJPEG2KDecoderBase::decode(
     }
 
     // determine the number of bytes per sample (bits allocated) for the de-compressed object.
-    const Uint16 bytesPerSample = (imageBitsAllocated > 8) ? 2 : 1;
+    const Uint16 bytesPerSample = (imageBitsStored > 8) ? 2 : 1;
 
     // 64-bit math to avoid overflow
     const uint64_t pixels = static_cast<uint64_t>(imageRows) * static_cast<uint64_t>(imageColumns);
@@ -346,7 +346,7 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
         return EC_J2KUnsupportedBitDepth;  
     }
 
-    const Uint16 bytesPerSample = (imageBitsAllocated > 8) ? 2 : 1;
+    const Uint16 bytesPerSample = (imageBitsStored > 8) ? 2 : 1;
 
     const uint64_t pixels = uint64_t(imageRows) * uint64_t(imageColumns);
     const uint64_t bytesPerFrame = uint64_t(bytesPerSample) * pixels * uint64_t(imageSamplesPerPixel);
@@ -662,6 +662,17 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
             opj_stream_destroy(l_stream); opj_destroy_codec(l_codec); opj_image_destroy(image);
             delete[] jlsData;
             return EC_CorruptedData;
+        }
+
+        Uint16 pixelRep = 0;                           // default = unsigned
+        dataset->findAndGetUint16(DCM_PixelRepresentation, pixelRep);  
+
+        const bool signedSource = (image->comps[0].sgnd != 0);
+        if (pixelRep != (signedSource ? 1 : 0))
+        {
+            opj_stream_destroy(l_stream); opj_destroy_codec(l_codec); opj_image_destroy(image);
+            delete[] jlsData;
+            return EC_J2KImageDataMismatch;
         }
 
         // validate component precision vs bytesPerSample
