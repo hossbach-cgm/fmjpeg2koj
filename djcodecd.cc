@@ -148,6 +148,10 @@ OFCondition DJPEG2KDecoderBase::decode(
     //we only support up to 16 bits per sample
     if ((imageBitsStored < 1) || (imageBitsStored > 16)) return EC_J2KUnsupportedBitDepth;
 
+    if (imageBitsAllocated > 16)
+    {
+        return EC_J2KUnsupportedBitDepth;
+    }
 
     // determine the number of bytes per sample (bits allocated) for the de-compressed object.
     const Uint16 bytesPerSample = (imageBitsAllocated > 8) ? 2 : 1;
@@ -336,6 +340,11 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
 
     //we only support up to 16 bits per sample
     if ((imageBitsStored < 1) || (imageBitsStored > 16)) return EC_J2KUnsupportedBitDepth;
+    
+    if (imageBitsAllocated > 16)
+    {
+        return EC_J2KUnsupportedBitDepth;  
+    }
 
     const Uint16 bytesPerSample = (imageBitsAllocated > 8) ? 2 : 1;
 
@@ -657,7 +666,8 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
 
         // validate component precision vs bytesPerSample
         const int prec0 = image->comps[0].prec;  // bits per sample as reported by OpenJPEG
-        if ((bytesPerSample == 1 && prec0 > 8) || (bytesPerSample == 2 && prec0 <= 8)) {
+        if (bytesPerSample == 1 && prec0 > 8)
+        {
             opj_stream_destroy(l_stream); opj_destroy_codec(l_codec); opj_image_destroy(image);
             delete[] jlsData;
             return EC_J2KImageDataMismatch;
@@ -692,7 +702,7 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
                     };
 
                 const auto& C = image->comps[0];
-                const size_t pixels = static_cast<size_t>(imageColumns) * imageRows;
+                const size_t pixels = static_cast<size_t>(imageColumns) * static_cast<size_t>(imageRows);
                 const int outBits = (bytesPerSample == 1) ? 8 : 16;
 
                 // 1) Validate source precision against container
@@ -745,10 +755,27 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
                     }
                     else {
                         if (outBits == 8) {
-                            copyUint32ToUint8(image, OFreinterpret_cast(Uint8*, buffer), imageColumns, imageRows);
+                            auto const cpy = copyUint32ToUint8(image, OFreinterpret_cast(Uint8*, buffer), imageColumns, imageRows);
+                            if (cpy.bad())
+                            {
+                                opj_stream_destroy(l_stream);
+                                opj_destroy_codec(l_codec);
+                                opj_image_destroy(image);
+                                delete[] jlsData;
+                                return cpy;
+                            }
                         }
                         else if (outBits == 16) {
-                            copyUint32ToUint16(image, OFreinterpret_cast(Uint16*, buffer), imageColumns, imageRows);
+                            auto const cpy = copyUint32ToUint16(image, OFreinterpret_cast(Uint16*, buffer), imageColumns, imageRows);
+                            if (cpy.bad())
+                            {
+                                opj_stream_destroy(l_stream);
+                                opj_destroy_codec(l_codec);
+                                opj_image_destroy(image);
+                                delete[] jlsData;
+                                return cpy;
+                            }
+
                         }
                         else {
                             opj_stream_destroy(l_stream); opj_destroy_codec(l_codec); opj_image_destroy(image);
@@ -758,16 +785,23 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
                     }
                 }
                 // For RGB
-                if (image->numcomps == 3) {
+                else if (image->numcomps == 3) {
+                    if (image->color_space != OPJ_CLRSPC_SRGB) {
+                        opj_stream_destroy(l_stream); opj_destroy_codec(l_codec); opj_image_destroy(image);
+                        delete[] jlsData;
+                        return EC_J2KCodecUnsupportedImageType;
+                    }
                     int p0 = image->comps[0].prec, p1 = image->comps[1].prec, p2 = image->comps[2].prec;
                     if (!(check_prec_fits(0) && check_prec_fits(1) && check_prec_fits(2)))
                     {
                         opj_stream_destroy(l_stream); opj_destroy_codec(l_codec); opj_image_destroy(image);
+                        delete[] jlsData;
                         return EC_J2KUnsupportedBitDepth;
                     }
                     if (!(p0 == p1 && p1 == p2)) 
                     {
                         opj_stream_destroy(l_stream); opj_destroy_codec(l_codec); opj_image_destroy(image);
+                        delete[] jlsData;
                         return EC_J2KImageDataMismatch;  // inconsistent component precisions
                     }
 
@@ -793,11 +827,28 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
                     }
                     if (imagePlanarConfiguration == 0)
                     {
-                        copyRGBUint8ToRGBUint8(image, OFreinterpret_cast(Uint8*, buffer), imageColumns, imageRows);
+                        auto const cpy = copyRGBUint8ToRGBUint8(image, OFreinterpret_cast(Uint8*, buffer), imageColumns, imageRows);
+                        if (cpy.bad())
+                        {
+                            opj_stream_destroy(l_stream);
+                            opj_destroy_codec(l_codec);
+                            opj_image_destroy(image);
+                            delete[] jlsData;
+                            return cpy;
+                        }
+
                     }
                     else if (imagePlanarConfiguration == 1)
                     {
-                        copyRGBUint8ToRGBUint8Planar(image, OFreinterpret_cast(Uint8*, buffer), imageColumns, imageRows);
+                        auto const cpy = copyRGBUint8ToRGBUint8Planar(image, OFreinterpret_cast(Uint8*, buffer), imageColumns, imageRows);
+                        if (cpy.bad())
+                        {
+                            opj_stream_destroy(l_stream);
+                            opj_destroy_codec(l_codec);
+                            opj_image_destroy(image);
+                            delete[] jlsData;
+                            return cpy;
+                        }
                     }
                 }
                 if (result.bad()) {
@@ -932,7 +983,7 @@ Uint32 DJPEG2KDecoderBase::computeNumberOfFragments(
     DcmPixelSequence* pixSeq)
 {
 
-    unsigned long numItems = pixSeq->card();
+    const Uint32 numItems = pixSeq->card();
     DcmPixelItem* pixItem = NULL;
 
     // We first check the simple cases, that is, a single-frame image,
