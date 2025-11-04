@@ -694,6 +694,10 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
                         delete[] jlsData;
                         return EC_J2KImageDataMismatch;
                     }
+                    if (image->comps[0].prec <= 8)
+                        copyUint32ToUint8(image, OFreinterpret_cast(Uint8*, buffer), imageColumns, imageRows);
+                    if (image->comps[0].prec > 8)
+                        copyUint32ToUint16(image, OFreinterpret_cast(Uint16*, buffer), imageColumns, imageRows);
                 }
                 // For RGB
                 if (image->numcomps == 3) {
@@ -703,6 +707,14 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
                             delete[] jlsData;
                             return EC_J2KImageDataMismatch;
                         }
+                    }
+                    if (imagePlanarConfiguration == 0)
+                    {
+                        copyRGBUint8ToRGBUint8(image, OFreinterpret_cast(Uint8*, buffer), imageColumns, imageRows);
+                    }
+                    else if (imagePlanarConfiguration == 1)
+                    {
+                        copyRGBUint8ToRGBUint8Planar(image, OFreinterpret_cast(Uint8*, buffer), imageColumns, imageRows);
                     }
                 }
                 if (result.bad()) {
