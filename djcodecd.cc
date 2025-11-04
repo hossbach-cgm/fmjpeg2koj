@@ -702,6 +702,19 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
                 // For RGB
                 if (image->numcomps == 3) {
                     for (int c = 0; c < 3; ++c) {
+                        if (image->comps[c].prec > 8) {
+                            // We do not support >8 bits per sample for RGB images
+                            opj_stream_destroy(l_stream); opj_destroy_codec(l_codec); opj_image_destroy(image);
+                            delete[] jlsData;
+                            return EC_J2KUnsupportedBitDepth;
+                        }
+                        if (image->comps[c].sgnd)
+                        {
+                            // We do not support signed components for RGB images
+                            opj_stream_destroy(l_stream); opj_destroy_codec(l_codec); opj_image_destroy(image);
+                            delete[] jlsData;
+                            return EC_J2KImageDataMismatch;
+                        }
                         if (!comp_has_full_res(image, c, imageColumns, imageRows)) {
                             opj_stream_destroy(l_stream); opj_destroy_codec(l_codec); opj_image_destroy(image);
                             delete[] jlsData;
