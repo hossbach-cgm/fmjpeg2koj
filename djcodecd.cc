@@ -121,7 +121,7 @@ OFCondition DJPEG2KDecoderBase::decode(
 
     // must have at least BOT (item 0) + >=1 fragment
     const Uint32 numItems = pixSeq->card();
-    if (numItems < 2) 
+    if (numItems < 2)
     {
         FMJPEG2K_WARN("JPEG-2000 pixel sequence contains no image data");
         return EC_CorruptedData;
@@ -176,9 +176,9 @@ OFCondition DJPEG2KDecoderBase::decode(
 
     const Uint32 frameSize = static_cast<Uint32>(bytesPerFrame);
     const Uint32 totalSize = static_cast<Uint32>(total64);
-    
+
     // sanity (should be even by construction)
-    if (totalSize & 1u) 
+    if (totalSize & 1u)
     {
         return EC_CorruptedData;
     }
@@ -244,7 +244,7 @@ OFCondition DJPEG2KDecoderBase::decode(
     }
 
     // mismatch is common in the wild; do not fail hard
-    if (result.good() && (numberOfFramesPresent && imageFrames != currentFrame)) 
+    if (result.good() && (numberOfFramesPresent && imageFrames != currentFrame))
     {
         FMJPEG2K_WARN("NumberOfFrames mismatch: tag=" << imageFrames
             << " decoded=" << currentFrame << " (updating tag)");
@@ -262,7 +262,7 @@ OFCondition DJPEG2KDecoderBase::decode(
         // but other modules such as SOP Common.  We only perform these
         // changes if we're on the main level of the dataset,
         // which should always identify itself as dataset, not as item.
-        if ((dataset->ident() == EVR_dataset) && djcp &&(djcp->getUIDCreation() == EJ2KUC_always))
+        if ((dataset->ident() == EVR_dataset) && djcp && (djcp->getUIDCreation() == EJ2KUC_always))
         {
             // create new SOP instance UID
             result = DcmCodec::newInstance((DcmItem*)dataset, NULL, NULL, NULL);
@@ -353,11 +353,11 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
 
     Sint32 imageFrames = 0;
     (void)dataset->findAndGetSint32(DCM_NumberOfFrames, imageFrames);
-    if (imageFrames >= OFstatic_cast(Sint32, numItems)) 
+    if (imageFrames >= OFstatic_cast(Sint32, numItems))
     {
         imageFrames = numItems - 1;
     }
-    if (imageFrames < 1) 
+    if (imageFrames < 1)
     {
         imageFrames = 1;
     }
@@ -429,6 +429,10 @@ OFCondition copyRGBUint8ToRGBUint8Planar(
     Uint8* imageFrame,
     Uint16 columns,
     Uint16 rows);
+
+static inline bool copyInt32ToInt8(const opj_image_t* img, int8_t* dst, size_t n);
+
+static inline bool copyInt32ToInt16(const opj_image_t* img, int16_t* dst, size_t n);
 
 OFCondition DJPEG2KDecoderBase::decodeFrame(
     DcmPixelSequence* fromPixSeq,
@@ -506,9 +510,9 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
             if (result.good() && pixItem)
             {
                 fragmentLength = pixItem->getLength();
-                if (result.good()) 
+                if (result.good())
                 {
-                    if (compressedSize + fragmentLength < compressedSize) 
+                    if (compressedSize + fragmentLength < compressedSize)
                     {
                         return EC_MemoryExhausted;
                     }
@@ -521,7 +525,7 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
     // get the compressed data
     if (result.good())
     {
-        if (compressedSize == 0) 
+        if (compressedSize == 0)
         {
             return EC_CorruptedData;
         }
@@ -606,7 +610,7 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
             result = EC_CorruptedData;
         }
 
-        if(result.good()) 
+        if (result.good())
         {
             const OPJ_BOOL ok = opj_read_header(l_stream, l_codec, &image);
             if (ok != OPJ_TRUE || image == nullptr) {
@@ -617,7 +621,7 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
                 return EC_CorruptedData;
             }
         }
-        else 
+        else
         {
             if (l_stream) opj_stream_destroy(l_stream), l_stream = NULL;
             if (l_codec)  opj_destroy_codec(l_codec), l_codec = NULL;
@@ -687,20 +691,86 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
                         return true;
                     };
 
+                const auto& C = image->comps[0];
+                const size_t pixels = static_cast<size_t>(imageColumns) * imageRows;
+                const int outBits = (bytesPerSample == 1) ? 8 : 16;
+
+                // 1) Validate source precision against container
+                //    - grayscale: just check comp 0
+                //    - RGB: check all three and also equality among them
+                auto check_prec_fits = [&](int c) {
+                    int p = image->comps[c].prec;
+                    return (p >= 1 && p <= outBits);
+                    };
+
                 // For grayscale
                 if (image->numcomps == 1) {
+                    if (!check_prec_fits(0))
+                    {
+                        opj_stream_destroy(l_stream); opj_destroy_codec(l_codec); opj_image_destroy(image);
+                        return EC_J2KUnsupportedBitDepth;
+                    }
                     if (!comp_has_full_res(image, 0, imageColumns, imageRows)) {
                         opj_stream_destroy(l_stream); opj_destroy_codec(l_codec); opj_image_destroy(image);
                         delete[] jlsData;
                         return EC_J2KImageDataMismatch;
                     }
-                    if (image->comps[0].prec <= 8)
-                        copyUint32ToUint8(image, OFreinterpret_cast(Uint8*, buffer), imageColumns, imageRows);
-                    if (image->comps[0].prec > 8)
-                        copyUint32ToUint16(image, OFreinterpret_cast(Uint16*, buffer), imageColumns, imageRows);
+
+                    if (C.prec < 1 || C.prec > outBits) {
+                        opj_stream_destroy(l_stream); opj_destroy_codec(l_codec); opj_image_destroy(image);
+                        delete[] jlsData;
+                        return EC_J2KUnsupportedBitDepth;
+                    }
+
+                    if (C.sgnd) {
+                        if (outBits == 8) {
+                            if (!copyInt32ToInt8(image, reinterpret_cast<int8_t*>(buffer), pixels)) {
+                                opj_stream_destroy(l_stream); opj_destroy_codec(l_codec); opj_image_destroy(image);
+                                delete[] jlsData;
+                                return EC_J2KImageDataMismatch;
+                            }
+                        }
+                        else if (outBits == 16) {
+                            if (!copyInt32ToInt16(image, reinterpret_cast<int16_t*>(buffer), pixels)) {
+                                opj_stream_destroy(l_stream); opj_destroy_codec(l_codec); opj_image_destroy(image);
+                                delete[] jlsData;
+                                return EC_J2KImageDataMismatch;
+                            }
+                        }
+                        else {
+                            opj_stream_destroy(l_stream); opj_destroy_codec(l_codec); opj_image_destroy(image);
+                            delete[] jlsData;
+                            return EC_J2KUnsupportedBitDepth;
+                        }
+                    }
+                    else {
+                        if (outBits == 8) {
+                            copyUint32ToUint8(image, OFreinterpret_cast(Uint8*, buffer), imageColumns, imageRows);
+                        }
+                        else if (outBits == 16) {
+                            copyUint32ToUint16(image, OFreinterpret_cast(Uint16*, buffer), imageColumns, imageRows);
+                        }
+                        else {
+                            opj_stream_destroy(l_stream); opj_destroy_codec(l_codec); opj_image_destroy(image);
+                            delete[] jlsData;
+                            return EC_J2KUnsupportedBitDepth;
+                        }
+                    }
                 }
                 // For RGB
                 if (image->numcomps == 3) {
+                    int p0 = image->comps[0].prec, p1 = image->comps[1].prec, p2 = image->comps[2].prec;
+                    if (!(check_prec_fits(0) && check_prec_fits(1) && check_prec_fits(2)))
+                    {
+                        opj_stream_destroy(l_stream); opj_destroy_codec(l_codec); opj_image_destroy(image);
+                        return EC_J2KUnsupportedBitDepth;
+                    }
+                    if (!(p0 == p1 && p1 == p2)) 
+                    {
+                        opj_stream_destroy(l_stream); opj_destroy_codec(l_codec); opj_image_destroy(image);
+                        return EC_J2KImageDataMismatch;  // inconsistent component precisions
+                    }
+
                     for (int c = 0; c < 3; ++c) {
                         if (image->comps[c].prec > 8) {
                             // We do not support >8 bits per sample for RGB images
@@ -1123,12 +1193,12 @@ OFCondition copyUint32ToUint8(
 {
     if (imageFrame == NULL) return EC_IllegalCall;
 
-    unsigned long numPixels = columns * rows;
+    const auto numPixels = static_cast<size_t>(columns) * static_cast<size_t>(rows);
     if (numPixels == 0) return EC_IllegalCall;
 
     Uint8* t = imageFrame;          // target
     OPJ_INT32* g = image->comps[0].data;   // grey plane  
-    for (unsigned long i = numPixels; i; i--)
+    for (size_t i = numPixels; i; i--)
     {
         *t++ = clampToUint8(*g++);
     }
@@ -1144,17 +1214,49 @@ OFCondition copyUint32ToUint16(
 {
     if (imageFrame == NULL) return EC_IllegalCall;
 
-    unsigned long numPixels = columns * rows;
+    const auto numPixels = static_cast<size_t>(columns) * static_cast<size_t>(rows);
     if (numPixels == 0) return EC_IllegalCall;
 
     Uint16* t = imageFrame;          // target
     OPJ_INT32* g = image->comps[0].data;   // grey plane  
-    for (unsigned long i = numPixels; i; i--)
+    for (size_t i = numPixels; i; i--)
     {
         *t++ = clampToUint16(*g++);
     }
 
     return EC_Normal;
+}
+
+static inline bool copyInt32ToInt8(const opj_image_t* img, int8_t* dst, size_t n)
+{
+    const opj_image_comp_t& C = img->comps[0];
+    if (!C.sgnd) return false;
+    const int P = C.prec;
+    const int32_t lo = -(1 << (P - 1));
+    const int32_t hi = (1 << (P - 1)) - 1;
+
+    for (size_t i = 0; i < n; ++i) {
+        const int32_t v = C.data[i];
+        if (v < lo || v > hi) return false;
+        dst[i] = static_cast<int8_t>(v);
+    }
+    return true;
+}
+
+static inline bool copyInt32ToInt16(const opj_image_t* img, int16_t* dst, size_t n)
+{
+    const opj_image_comp_t& C = img->comps[0];
+    if (!C.sgnd) return false;
+    const int P = C.prec;
+    const int32_t lo = -(1 << (P - 1));
+    const int32_t hi = (1 << (P - 1)) - 1;
+
+    for (size_t i = 0; i < n; ++i) {
+        const int32_t v = C.data[i];
+        if (v < lo || v > hi) return false;
+        dst[i] = static_cast<int16_t>(v);
+    }
+    return true;
 }
 
 OFCondition copyRGBUint8ToRGBUint8(
@@ -1165,14 +1267,14 @@ OFCondition copyRGBUint8ToRGBUint8(
 {
     if (imageFrame == NULL) return EC_IllegalCall;
 
-    unsigned long numPixels = columns * rows;
+    const auto numPixels = static_cast<size_t>(columns) * static_cast<size_t>(rows);
     if (numPixels == 0) return EC_IllegalCall;
 
     Uint8* t = imageFrame;          // target
     OPJ_INT32* r = image->comps[0].data; // red plane
     OPJ_INT32* g = image->comps[1].data; // green plane
     OPJ_INT32* b = image->comps[2].data; // blue plane
-    for (unsigned long i = numPixels; i; i--)
+    for (size_t i = numPixels; i; i--)
     {
         *t++ = clampToUint8(*r++);
         *t++ = clampToUint8(*g++);
@@ -1190,14 +1292,14 @@ OFCondition copyRGBUint8ToRGBUint8Planar(
 {
     if (imageFrame == NULL) return EC_IllegalCall;
 
-    unsigned long numPixels = columns * rows;
+    const auto numPixels = static_cast<size_t>(columns) * static_cast<size_t>(rows);
     if (numPixels == 0) return EC_IllegalCall;
 
     Uint8* t = imageFrame;          // target
     for (unsigned long j = 0; j < 3; j++)
     {
         OPJ_INT32* r = image->comps[j].data; // color plane  
-        for (unsigned long i = numPixels; i; i--)
+        for (size_t i = numPixels; i; i--)
         {
             *t++ = clampToUint8(*r++);
         }
