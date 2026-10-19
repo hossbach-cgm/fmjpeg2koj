@@ -35,6 +35,9 @@ public:
   /** registers decoder for all supported JPEG-LS processes.
    *  If already registered, call is ignored unless cleanup() has
    *  been performed before.
+   *  Attention: Registration is not internally synchronized. The caller must
+   *  serialize registerCodecs() and cleanup() calls and complete registration
+   *  before other threads start using the codecs.
    *  @param uidcreation flag indicating whether or not
    *    a new SOP Instance UID should be assigned upon decompression.
    *  @param planarconfig flag indicating how planar configuration
@@ -47,6 +50,8 @@ public:
     OFBool ignoreOffsetTable = OFFalse);
 
   /** deregisters decoders.
+   *  The caller must serialize this call with registerCodecs() and other
+   *  cleanup() calls.
    *  Attention: Must not be called while other threads might still use
    *  the registered codecs, e.g. because they are currently decoding
    *  DICOM data sets through dcmdata.
