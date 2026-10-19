@@ -1,12 +1,21 @@
+IF "%1"=="Release" (
 SET TYPE=Release
+) ELSE (
 SET TYPE=Debug
+)
+
+IF "%2"=="localgit" (
+SET GITHUBURL=http://gitcache:8080/github.com
+) ELSE (
+SET GITHUBURL=https://github.com
+)
 
 REM a top level directory for all PACS related code
 SET DEVSPACE="%CD%"
-SET GENERATOR="Visual Studio 15 2017 Win64"
+SET GENERATOR="Visual Studio 17 2022" -A x64
 
 cd %DEVSPACE%
-git clone --branch=DCMTK-3.6.5 --single-branch --depth 1 https://github.com/DCMTK/dcmtk.git
+git clone --branch=DCMTK-3.6.8 --single-branch --depth 1 https://github.com/DCMTK/dcmtk.git
 cd dcmtk
 mkdir build-%TYPE%
 cd build-%TYPE%

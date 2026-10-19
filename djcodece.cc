@@ -111,6 +111,12 @@ OFBool DJPEG2KEncoderBase::canChangeCoding(
 	return (oldIsUncompressed && newIsThisEncoder) ? OFTrue : OFFalse;
 }
 
+Uint16 DJPEG2KEncoderBase::decodedBitsAllocated(
+	Uint16 bitsAllocated,
+	Uint16 bitsStored) const
+{
+	return 0;
+}
 
 OFCondition DJPEG2KEncoderBase::decode(
 	const DcmRepresentationParameter * /* fromRepParam */,
@@ -283,14 +289,6 @@ OFCondition DJPEG2KEncoderBase::determineDecompressedColorModel(
 {
 	return EC_IllegalCall;
 }
-
-#if PACKAGE_VERSION_NUMBER > 369
-Uint16 DJPEG2KEncoderBase::decodedBitsAllocated(Uint16 bitsAllocated, Uint16 bitsStored) const
-{
-	return 0;
-}
-#endif
-
 
 OFCondition DJPEG2KEncoderBase::adjustOverlays(
 	DcmItem *dataset,
@@ -903,7 +901,7 @@ OFCondition DJPEG2KEncoderBase::compressRenderedFrame(
 
 	// This is the buffer with the uncompressed pixel data
 	Uint8 *buffer;
-	size_t buffer_size;
+	unsigned long buffer_size;
 
 	Uint32 framesize = dimage->getWidth() * dimage->getHeight();
 	switch(dinter->getRepresentation())
@@ -1190,7 +1188,7 @@ OFCondition frametoimage(const Uint8 *framePointer, int planarConfiguration, OFS
 		    {			
 				OPJ_INT32 *target = image->comps[i].data;
 				const Uint8 *source = &framePointer[i * bytesAllocated];
-				for (unsigned int pos = 0; pos < height * width; pos++)
+				for (int pos = 0; pos < height * width; pos++)
 				{
 					*target = (isSigned) ? (Sint8) *source : *source;
 					target++;
@@ -1204,7 +1202,7 @@ OFCondition frametoimage(const Uint8 *framePointer, int planarConfiguration, OFS
 		    {			
 				OPJ_INT32 *target = image->comps[i].data;
 				const Uint8 *source = &framePointer[i * height * width * bytesAllocated];
-				for (unsigned int pos = 0; pos < height * width; pos++)
+				for (int pos = 0; pos < height * width; pos++)
 				{
 					*target =  (isSigned) ? (Sint8) *source : *source;
 					target++;
@@ -1221,7 +1219,7 @@ OFCondition frametoimage(const Uint8 *framePointer, int planarConfiguration, OFS
 		    {
 				OPJ_INT32 *target = image->comps[i].data;
 				const Uint16 *source = (Uint16 *) &framePointer[i * bytesAllocated];
-				for (unsigned int pos = 0; pos < height * width; pos++)
+				for (int pos = 0; pos < height * width; pos++)
 				{
 					*target =  (isSigned) ? (Sint16) *source : *source;
 					target++;
@@ -1235,7 +1233,7 @@ OFCondition frametoimage(const Uint8 *framePointer, int planarConfiguration, OFS
 		    {			
 				OPJ_INT32 *target = image->comps[i].data;
 				const Uint16 *source = (Uint16 *) &framePointer[i * height * width * bytesAllocated];
-				for (unsigned int pos = 0; pos < height * width; pos++)
+				for (int pos = 0; pos < height * width; pos++)
 				{
 					*target =  (isSigned) ? (Sint16) *source : *source;
 					target++;
@@ -1252,7 +1250,7 @@ OFCondition frametoimage(const Uint8 *framePointer, int planarConfiguration, OFS
 		    {
 				OPJ_INT32 *target = image->comps[i].data;
 				const Uint32 *source = (Uint32 *) &framePointer[i * bytesAllocated];
-				for (unsigned int pos = 0; pos < height * width; pos++)
+				for (int pos = 0; pos < height * width; pos++)
 				{					
 					*target =  (isSigned) ? (Sint32) *source : *source;
 					target++;
@@ -1266,7 +1264,7 @@ OFCondition frametoimage(const Uint8 *framePointer, int planarConfiguration, OFS
 		    {			
 				OPJ_INT32 *target = image->comps[i].data;
 				const Uint32 *source = (Uint32 *) &framePointer[i * height * width * bytesAllocated];
-				for (unsigned int pos = 0; pos < height * width; pos++)
+				for (int pos = 0; pos < height * width; pos++)
 				{
 					*target =  (isSigned) ? (Sint32) *source : *source;
 					target++;
