@@ -2,7 +2,11 @@
 
 The tests create their own JPEG-2000 frames with OpenJPEG. No patient data or external image fixtures are used.
 
-Enable them with `-DBUILD_TESTING=ON`, build, then run:
+The tests are enabled by default through CMake's `BUILD_TESTING` option. They can be explicitly enabled with `-DBUILD_TESTING=ON` or disabled with `-DBUILD_TESTING=OFF`.
+
+GitHub Actions runs CTest after the build for pushes and pull requests to `master`. A test failure or an empty test list fails the CI job. The C++ language-mode checks run during CMake configuration.
+
+After building, run the tests locally with:
 
 ```text
 ctest --test-dir build-Release -C Release --output-on-failure
