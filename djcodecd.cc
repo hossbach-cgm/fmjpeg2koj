@@ -83,7 +83,10 @@ Uint16 DJPEG2KDecoderBase::decodedBitsAllocated(
     Uint16 bitsAllocated,
     Uint16 bitsStored) const
 {
-    if ((bitsStored < 1) || (bitsStored > 16)) return 0;
+    // Output containers must match the DICOM BitsAllocated value.
+    // Packed 1-bit and other non-byte/word containers are not supported.
+    if ((bitsAllocated != 8) && (bitsAllocated != 16)) return 0;
+    if ((bitsStored < 1) || (bitsStored > bitsAllocated)) return 0;
 
     return bitsAllocated;
 }
@@ -156,13 +159,13 @@ OFCondition DJPEG2KDecoderBase::decode(
     //we only support up to 16 bits per sample
     if ((imageBitsStored < 1) || (imageBitsStored > 16)) return EC_J2KUnsupportedBitDepth;
 
-    if (imageBitsAllocated > 16)
+    if (decodedBitsAllocated(imageBitsAllocated, imageBitsStored) == 0)
     {
         return EC_J2KUnsupportedBitDepth;
     }
 
-    // determine the number of bytes per sample (bits allocated) for the de-compressed object.
-    const Uint16 bytesPerSample = (imageBitsStored > 8) ? 2 : 1;
+    // BitsStored describes precision; BitsAllocated defines the output container.
+    const Uint16 bytesPerSample = imageBitsAllocated / 8;
 
     // 64-bit math to avoid overflow
     const uint64_t pixels = static_cast<uint64_t>(imageRows) * static_cast<uint64_t>(imageColumns);
@@ -349,12 +352,12 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
     //we only support up to 16 bits per sample
     if ((imageBitsStored < 1) || (imageBitsStored > 16)) return EC_J2KUnsupportedBitDepth;
     
-    if (imageBitsAllocated > 16)
+    if (decodedBitsAllocated(imageBitsAllocated, imageBitsStored) == 0)
     {
-        return EC_J2KUnsupportedBitDepth;  
+        return EC_J2KUnsupportedBitDepth;
     }
 
-    const Uint16 bytesPerSample = (imageBitsStored > 8) ? 2 : 1;
+    const Uint16 bytesPerSample = imageBitsAllocated / 8;
 
     const uint64_t pixels = uint64_t(imageRows) * uint64_t(imageColumns);
     const uint64_t bytesPerFrame = uint64_t(bytesPerSample) * pixels * uint64_t(imageSamplesPerPixel);
@@ -468,6 +471,13 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
     if (!cp)
     {
         return EC_IllegalParameter;
+    }
+
+    // The RGB copy routines currently write byte samples only. Do not report
+    // success with a partially written word-sized output buffer.
+    if (imageSamplesPerPixel == 3 && bytesPerSample != 1)
+    {
+        return EC_J2KUnsupportedBitDepth;
     }
 
     DcmPixelItem* pixItem = NULL;

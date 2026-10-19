@@ -77,6 +77,14 @@ TARGET_LINK_LIBRARIES(fmjpeg2k
 	${OPENJPEG_LIBRARIES}
 	)
 
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(test_decode_sample_width tests/decode_sample_width.cc)
+  set_property(TARGET test_decode_sample_width PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  target_link_libraries(test_decode_sample_width PRIVATE fmjpeg2k)
+  add_test(NAME decode_sample_width COMMAND test_decode_sample_width)
+endif()
+
 include(GenerateExportHeader)
 generate_export_header(fmjpeg2k)
 set_property(TARGET fmjpeg2k PROPERTY VERSION ${fmjpeg2k_VERSION})
