@@ -18,6 +18,7 @@
 #ifndef FMJPEG2K_DJCPARAM_H
 #define FMJPEG2K_DJCPARAM_H
 
+#include "cxx_config.h"
 #include "dcmtk/config/osconfig.h"
 #include "dcmtk/dcmdata/dccodec.h" /* for DcmCodecParameter */
 #include "djlsutil.h" /* for enums */

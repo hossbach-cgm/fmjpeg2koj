@@ -18,6 +18,7 @@
 #ifndef FMJPEG2K_DJRPARAM_H
 #define FMJPEG2K_DJRPARAM_H
 
+#include "cxx_config.h"
 #include "dcmtk/config/osconfig.h"
 #include "dcmtk/dcmdata/dcpixel.h" /* for class DcmRepresentationParameter */
 #include "dldefine.h"

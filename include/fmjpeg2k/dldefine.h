@@ -19,6 +19,7 @@
 #ifndef DL2KDEFINE_H
 #define DL2KDEFINE_H
 
+#include "cxx_config.h"
 #include "dcmtk/config/osconfig.h"
 
 #include "dcmtk/ofstd/ofdefine.h"

@@ -24,6 +24,7 @@ LINK_DIRECTORIES(${FMJPEG2K}/lib)
 add_definitions(-Dfmjpeg2k_EXPORTS)
 
 set(fmjpeg2k_HEADERS
+    include/fmjpeg2k/cxx_config.h
 	include/fmjpeg2k/djcodecd.h
 	include/fmjpeg2k/djcodece.h
 	include/fmjpeg2k/djcparam.h
@@ -76,9 +77,32 @@ TARGET_LINK_LIBRARIES(fmjpeg2k
 
 include(CTest)
 if(BUILD_TESTING)
-  add_executable(test_decode_sample_width tests/decode_sample_width.cc)
+  # A consumer must explicitly select a compatible language mode. Test the
+  # header itself, independently of DCMTK's own compiler/version checks.
+  foreach(standard IN ITEMS 17 20)
+    try_compile(FMJPEG2K_CXX${standard}_ACCEPTED
+      SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/tests/cxx_standard_probe.cc"
+      NO_CACHE
+      CXX_STANDARD ${standard}
+      CXX_STANDARD_REQUIRED ON
+      CXX_EXTENSIONS OFF
+      OUTPUT_VARIABLE FMJPEG2K_CXX${standard}_OUTPUT)
+  endforeach()
+  if(FMJPEG2K_CXX17_ACCEPTED OR
+     NOT FMJPEG2K_CXX17_OUTPUT MATCHES "fmjpeg2k requires C[+][+]20 or newer")
+    message(FATAL_ERROR "The public header must reject C++17 with the fmjpeg2k diagnostic.\n${FMJPEG2K_CXX17_OUTPUT}")
+  endif()
+  if(NOT FMJPEG2K_CXX20_ACCEPTED)
+    message(FATAL_ERROR "The public header must accept C++20.\n${FMJPEG2K_CXX20_OUTPUT}")
+  endif()
+  message(STATUS "fmjpeg2k consumer language check: C++17 rejected, C++20 accepted")
+
+  add_executable(test_decode_sample_width tests/decode_sample_width.cc memory_file.cpp)
   target_link_libraries(test_decode_sample_width PRIVATE fmjpeg2k)
   add_test(NAME decode_sample_width COMMAND test_decode_sample_width)
+  add_executable(test_decode_color tests/decode_color.cc memory_file.cpp)
+  target_link_libraries(test_decode_color PRIVATE fmjpeg2k)
+  add_test(NAME decode_color COMMAND test_decode_color)
 endif()
 
 include(GenerateExportHeader)

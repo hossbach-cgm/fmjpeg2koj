@@ -18,6 +18,7 @@
 #ifndef FMJPEG2K_DJCODEC_H
 #define FMJPEG2K_DJCODEC_H
 
+#include "cxx_config.h"
 #include "dcmtk/config/osconfig.h"
 #include "dcmtk/dcmdata/dccodec.h"  /* for class DcmCodec */
 #include "dcmtk/dcmdata/dcofsetl.h" /* for struct DcmOffsetList */

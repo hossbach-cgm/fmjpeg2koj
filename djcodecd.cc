@@ -49,6 +49,112 @@
 
 
 
+// DICOM supplies the interpretation missing from a raw J2K codestream.
+// This describes the pixels AFTER OpenJPEG has applied its inverse MCT.
+static OFCondition outputColorModel(DcmItem* dataset, Uint16 samples, OFString& model)
+{
+    if (!dataset) return EC_IllegalParameter;
+    OFString pi;
+    OFCondition result = dataset->findAndGetOFString(DCM_PhotometricInterpretation, pi);
+    if (result.bad()) return result;
+    if (samples == 1 && (pi == "MONOCHROME1" || pi == "MONOCHROME2" || pi == "PALETTE COLOR"))
+        model = pi;
+    else if (samples == 3 && (pi == "RGB" || pi == "YBR_RCT" || pi == "YBR_ICT"))
+        model = "RGB";
+    else
+        return EC_J2KCodecUnsupportedImageType;
+    return EC_Normal;
+}
+
+// Validate the actual coding headers, including tile-part overrides. OpenJPEG's
+// public codestream-info API only exposes the default tile, not all overrides.
+// Keep the supported color subset explicit: no component-specific coding or
+// Part 2/custom MCT. Never guess RGB solely from the number of components.
+static bool supportedColorCodestream(const Uint8* data, size_t length, const OFString& pi)
+{
+    auto be16 = [](const Uint8* p) -> unsigned { return (unsigned(p[0]) << 8) | p[1]; };
+    auto be32 = [](const Uint8* p) -> uint64_t {
+        return (uint64_t(p[0]) << 24) | (uint64_t(p[1]) << 16) | (uint64_t(p[2]) << 8) | p[3];
+    };
+    // JP2 is accepted only as a wrapper; its color label is not authoritative
+    // for DICOM. Locate the codestream box without scanning packet payloads.
+    if (length < 2 || be16(data) != 0xff4f) {
+        size_t pos = 0;
+        bool found = false;
+        while (length - pos >= 8) {
+            uint64_t boxLength = be32(data + pos);
+            const uint64_t type = be32(data + pos + 4);
+            size_t header = 8;
+            if (boxLength == 1) {
+                if (length - pos < 16) return false;
+                boxLength = (be32(data + pos + 8) << 32) | be32(data + pos + 12);
+                header = 16;
+            }
+            else if (boxLength == 0) boxLength = length - pos;
+            if (boxLength < header || boxLength > length - pos) return false;
+            if (type == 0x6a703263) { // jp2c
+                data += pos + header;
+                length = static_cast<size_t>(boxLength) - header;
+                found = true;
+                break;
+            }
+            pos += static_cast<size_t>(boxLength);
+        }
+        if (!found || length < 2 || be16(data) != 0xff4f) return false;
+    }
+
+    bool haveDefaultCOD = false;
+    bool inTile = false;
+    bool haveData = false;
+    size_t tileEnd = 0;
+    size_t pos = 2;
+    while (length - pos >= 2) {
+        const unsigned marker = be16(data + pos);
+        if (marker == 0xffd9) return haveDefaultCOD && haveData && !inTile;
+        if (marker == 0xff93) { // SOD: skip packet data using SOT's Psot
+            if (!inTile || tileEnd < pos + 2 || tileEnd > length) return false;
+            pos = tileEnd;
+            inTile = false;
+            haveData = true;
+            continue;
+        }
+        if ((marker & 0xff00) != 0xff00 || length - pos < 4) return false;
+        const size_t segmentLength = be16(data + pos + 2);
+        if (segmentLength < 2 || segmentLength > length - pos - 2) return false;
+        if (marker == 0xff90) { // SOT
+            if (!haveDefaultCOD || inTile || segmentLength != 10) return false;
+            const uint64_t partLength = be32(data + pos + 6);
+            if (partLength == 0) {
+                // An unspecified length is legal only for the last tile-part.
+                // The enclosing codestream must end with EOC.
+                if (length < 2 || be16(data + length - 2) != 0xffd9) return false;
+                tileEnd = length - 2;
+                if (tileEnd < pos + 14) return false;
+            }
+            else {
+                if (partLength < 14 || partLength > length - pos) return false;
+                tileEnd = pos + static_cast<size_t>(partLength);
+            }
+            inTile = true;
+        }
+        else if (marker == 0xff52) { // COD
+            if (segmentLength < 12) return false;
+            const unsigned mct = data[pos + 8];
+            const unsigned wavelet = data[pos + 13];
+            if (pi == "RGB") { if (mct != 0) return false; }
+            else if (pi == "YBR_RCT") { if (mct != 1 || wavelet != 1) return false; }
+            else if (pi == "YBR_ICT") { if (mct != 1 || wavelet != 0) return false; }
+            else return false;
+            if (!inTile) haveDefaultCOD = true;
+        }
+        else if (marker == 0xff53 || marker == 0xff74 || marker == 0xff75 ||
+                 marker == 0xff77 || marker == 0xff78) return false;
+        pos += segmentLength + 2;
+        if (inTile && pos > tileEnd) return false;
+    }
+    return false;
+}
+
 DJPEG2KDecoderBase::DJPEG2KDecoderBase()
     : DcmCodec()
 {
@@ -201,16 +307,14 @@ OFCondition DJPEG2KDecoderBase::decode(
     // assume we can cast the codec parameter to what we need
     const DJPEG2KCodecParameter* djcp = OFreinterpret_cast(const DJPEG2KCodecParameter*, codecparam);
 
-    // determine planar configuration for uncompressed data
-    OFString imageSopClass;
-    OFString imagePhotometricInterpretation;
-    dataset->findAndGetOFString(DCM_SOPClassUID, imageSopClass);
-    dataset->findAndGetOFString(DCM_PhotometricInterpretation, imagePhotometricInterpretation);
-
     // allocate space for uncompressed pixel data element
     Uint8* base8 = NULL;
     Uint16* base16 = NULL;
-    OFCondition result;
+    OFString decompressedColorModel;
+    OFCondition result = outputColorModel(dataset, imageSamplesPerPixel, decompressedColorModel);
+    if (result.bad()) return result;
+    if (!djcp) return EC_IllegalParameter;
+    const Uint16 outputPlanar = determineOutputPlanarConfiguration(djcp, dataset, decompressedColorModel);
 
     if (bytesPerSample == 1) {
         // OB: exact byte size
@@ -271,6 +375,12 @@ OFCondition DJPEG2KDecoderBase::decode(
         result = dataset->putAndInsertString(DCM_NumberOfFrames, numBuf);
     }
 
+    if (result.good() && imageSamplesPerPixel == 3)
+    {
+        result = dataset->putAndInsertString(DCM_PhotometricInterpretation, decompressedColorModel.c_str());
+        if (result.good()) result = dataset->putAndInsertUint16(DCM_PlanarConfiguration, outputPlanar);
+    }
+
     if (result.good())
     {
         // the following operations do not affect the Image Pixel Module
@@ -296,8 +406,22 @@ OFCondition DJPEG2KDecoderBase::decode(
     const DcmStack& objStack,
     OFBool& removeOldRep) const
 {
-    // removeOldRep is left as it is, pixel data in original DICOM dataset is not modified
-    return decode(fromRepParam, pixSeq, uncompressedPixelData, cp, objStack);
+    DcmStack stack(objStack);
+    stack.pop();
+    DcmObject* object = stack.pop();
+    if (!object || (object->ident() != EVR_dataset && object->ident() != EVR_item)) return EC_InvalidTag;
+    DcmItem* dataset = OFstatic_cast(DcmItem*, object);
+    OFString oldPI, newPI;
+    Uint16 oldPlanar = 0xffff, newPlanar = 0xffff;
+    dataset->findAndGetOFString(DCM_PhotometricInterpretation, oldPI);
+    dataset->findAndGetUint16(DCM_PlanarConfiguration, oldPlanar);
+    OFCondition result = decode(fromRepParam, pixSeq, uncompressedPixelData, cp, objStack);
+    if (result.good()) {
+        dataset->findAndGetOFString(DCM_PhotometricInterpretation, newPI);
+        dataset->findAndGetUint16(DCM_PlanarConfiguration, newPlanar);
+        if (oldPI != newPI || oldPlanar != newPlanar) removeOldRep = OFTrue;
+    }
+    return result;
 }
 
 
@@ -396,32 +520,7 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
             imageFrames, imageColumns, imageRows, imageSamplesPerPixel, bytesPerSample);
     }
 
-    auto isValidPI = [](const OFString& s) {
-        static const char* k[] = {
-            "MONOCHROME1","MONOCHROME2","RGB","PALETTE COLOR",
-            "YBR_FULL","YBR_FULL_422","YBR_PARTIAL_422","YBR_ICT","YBR_RCT"
-        };
-        for (auto v : k) if (s == v) return true;
-        return false;
-        };
-
-    OFString pi;
-    if (dataset->findAndGetOFString(DCM_PhotometricInterpretation, pi).good() && isValidPI(pi)) {
-        decompressedColorModel = pi;
-    }
-    else {
-        // infer a sane local default without modifying the dataset
-        const OFBool hasPalette =
-            dataset->tagExistsWithValue(DCM_RedPaletteColorLookupTableData) ||
-            dataset->tagExistsWithValue(DCM_GreenPaletteColorLookupTableData) ||
-            dataset->tagExistsWithValue(DCM_BluePaletteColorLookupTableData);
-
-        if (hasPalette)          decompressedColorModel = "PALETTE COLOR";
-        else if (imageSamplesPerPixel == 3) decompressedColorModel = "RGB";
-        else                      decompressedColorModel = "MONOCHROME2";
-
-        FMJPEG2K_WARN("PI missing/invalid; using inferred color model: " << decompressedColorModel);
-    }
+    if (result.good()) result = outputColorModel(dataset, imageSamplesPerPixel, decompressedColorModel);
 
     return result;
 }
@@ -493,36 +592,10 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
     fragmentsForThisFrame = computeNumberOfFragments(imageFrames, frameNo, currentItem, ignoreOffsetTable, fromPixSeq);
     if (fragmentsForThisFrame == 0) result = EC_J2KCannotComputeNumberOfFragments;
 
-    // determine planar configuration for uncompressed data
-    OFString imageSopClass;
-    OFString imagePhotometricInterpretation;
-    dataset->findAndGetOFString(DCM_SOPClassUID, imageSopClass);
-    dataset->findAndGetOFString(DCM_PhotometricInterpretation, imagePhotometricInterpretation);
-    Uint16 imagePlanarConfiguration = 0; // 0 is color-by-pixel, 1 is color-by-plane
-
-    if (imageSamplesPerPixel > 1)
-    {
-        switch (cp->getPlanarConfiguration())
-        {
-        case EJ2KPC_restore:
-            // get planar configuration from dataset
-            imagePlanarConfiguration = 2; // invalid value
-            dataset->findAndGetUint16(DCM_PlanarConfiguration, imagePlanarConfiguration);
-            // determine auto default if not found or invalid
-            if (imagePlanarConfiguration > 1)
-                imagePlanarConfiguration = determinePlanarConfiguration(imageSopClass, imagePhotometricInterpretation);
-            break;
-        case EJ2KPC_auto:
-            imagePlanarConfiguration = determinePlanarConfiguration(imageSopClass, imagePhotometricInterpretation);
-            break;
-        case EJ2KPC_colorByPixel:
-            imagePlanarConfiguration = 0;
-            break;
-        case EJ2KPC_colorByPlane:
-            imagePlanarConfiguration = 1;
-            break;
-        }
-    }
+    OFString decompressedColorModel;
+    const OFCondition colorResult = outputColorModel(dataset, imageSamplesPerPixel, decompressedColorModel);
+    if (colorResult.bad()) return colorResult;
+    const Uint16 imagePlanarConfiguration = determineOutputPlanarConfiguration(cp, dataset, decompressedColorModel);
 
     // get the size of all the fragments
     if (result.good())
@@ -592,6 +665,15 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
             // DICOM encapsulated fragments are padded to even length; a trailing 0x00 is padding.
             --compressedSize;
             if (compressedSize == 0) { delete[] jlsData; return EC_CorruptedData; }
+        }
+
+        if (imageSamplesPerPixel == 3) {
+            OFString pi;
+            dataset->findAndGetOFString(DCM_PhotometricInterpretation, pi);
+            if (!supportedColorCodestream(jlsData, compressedSize, pi)) {
+                delete[] jlsData;
+                return EC_J2KCodecUnsupportedImageType;
+            }
         }
 
         DecodeData mysrc((unsigned char*)jlsData, compressedSize);
@@ -747,6 +829,7 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
                     if (!check_prec_fits(0))
                     {
                         opj_stream_destroy(l_stream); opj_destroy_codec(l_codec); opj_image_destroy(image);
+                        delete[] jlsData;
                         return EC_J2KUnsupportedBitDepth;
                     }
                     if (!comp_has_full_res(image, 0, imageColumns, imageRows)) {
@@ -815,7 +898,11 @@ OFCondition DJPEG2KDecoderBase::decodeFrame(
                 }
                 // For RGB
                 else if (image->numcomps == 3) {
-                    if (image->color_space != OPJ_CLRSPC_SRGB) {
+                    // A raw DICOM codestream has no JP2 sRGB label. Its color
+                    // semantics were validated against DICOM and the COD markers.
+                    if (image->color_space != OPJ_CLRSPC_UNKNOWN &&
+                        image->color_space != OPJ_CLRSPC_UNSPECIFIED &&
+                        image->color_space != OPJ_CLRSPC_SRGB) {
                         opj_stream_destroy(l_stream); opj_destroy_codec(l_codec); opj_image_destroy(image);
                         delete[] jlsData;
                         return EC_J2KCodecUnsupportedImageType;
@@ -953,19 +1040,40 @@ OFCondition DJPEG2KDecoderBase::encode(
 
 
 OFCondition DJPEG2KDecoderBase::determineDecompressedColorModel(
-    const DcmRepresentationParameter* /* fromParam */,
-    DcmPixelSequence* /* fromPixSeq */,
-    const DcmCodecParameter* /* cp */,
+    const DcmRepresentationParameter* fromParam,
+    DcmPixelSequence* fromPixSeq,
+    const DcmCodecParameter* cp,
     DcmItem* dataset,
     OFString& decompressedColorModel) const
 {
-    OFCondition result = EC_IllegalParameter;
-    if (dataset != NULL)
-    {
-        // retrieve color model from given dataset
-        result = dataset->findAndGetOFString(DCM_PhotometricInterpretation, decompressedColorModel);
+    if (!dataset || !fromPixSeq || !cp) return EC_IllegalParameter;
+    Uint32 frameSize = 0;
+    OFCondition result = fromPixSeq->getUncompressedFrameSize(dataset, frameSize, OFFalse);
+    if (result.bad()) return result;
+    if (frameSize == 0) return EC_CorruptedData;
+    // Match decodeFrame exactly, without changing the compressed dataset. Like
+    // DCMTK's JPEG decoder, decode the first frame to verify the output model.
+    const size_t words = (static_cast<size_t>(frameSize) + 1) / 2;
+    std::unique_ptr<Uint16[]> buffer(new(std::nothrow) Uint16[words]);
+    if (!buffer) return EC_MemoryExhausted;
+    Uint32 fragment = 1;
+    return decodeFrame(fromParam, fromPixSeq, cp, dataset, 0, fragment,
+        buffer.get(), frameSize, decompressedColorModel);
+}
+
+Uint16 DJPEG2KDecoderBase::determineOutputPlanarConfiguration(
+    const DJPEG2KCodecParameter* cp, DcmItem* dataset, const OFString& model)
+{
+    if (cp->getPlanarConfiguration() == EJ2KPC_colorByPixel) return 0;
+    if (cp->getPlanarConfiguration() == EJ2KPC_colorByPlane) return 1;
+    if (cp->getPlanarConfiguration() == EJ2KPC_restore) {
+        Uint16 planar = 2;
+        if (dataset->findAndGetUint16(DCM_PlanarConfiguration, planar).good() && planar <= 1)
+            return planar;
     }
-    return result;
+    OFString sopClass;
+    dataset->findAndGetOFString(DCM_SOPClassUID, sopClass);
+    return determinePlanarConfiguration(sopClass, model);
 }
 
 Uint16 DJPEG2KDecoderBase::determinePlanarConfiguration(

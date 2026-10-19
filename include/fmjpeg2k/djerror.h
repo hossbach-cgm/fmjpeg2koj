@@ -18,6 +18,7 @@
 #ifndef DJERROR_H
 #define DJERROR_H
 
+#include "cxx_config.h"
 #include "dcmtk/config/osconfig.h"
 #include "djlsutil.h" /* For the OFCondition codes */
 #include "openjpeg.h" /* OpenJPEG include */

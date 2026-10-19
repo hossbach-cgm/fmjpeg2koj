@@ -18,6 +18,7 @@
 #ifndef FMJPEG2K_DJLSUTILS_H
 #define FMJPEG2K_DJLSUTILS_H
 
+#include "cxx_config.h"
 #include "dcmtk/config/osconfig.h"
 #include "dcmtk/ofstd/ofcond.h"   /* for class OFCondition */
 #include "dcmtk/oflog/oflog.h"

@@ -1,3 +1,4 @@
+#include "cxx_config.h"
 #include "openjpeg.h"
 
 struct DecodeData {

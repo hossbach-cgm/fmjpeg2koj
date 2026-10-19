@@ -4,7 +4,6 @@
 #include "dcmtk/dcmdata/dcpxitem.h"
 #include "fmjpeg2k/djcodecd.h"
 #include "fmjpeg2k/djcparam.h"
-#include "fmjpeg2k/djerror.h"
 #include "fmjpeg2k/memory_file.h"
 
 #include <algorithm>
@@ -21,7 +20,7 @@ static void require(bool condition, const char* message)
 
 // Generate a lossless raw JPEG-2000 frame without external fixtures or tools.
 static std::vector<Uint8> encode(const std::array<OPJ_INT32, 4>& values,
-    unsigned precision, bool isSigned, unsigned components = 1)
+    unsigned precision, bool isSigned, unsigned components = 1, bool jp2 = false)
 {
     std::array<opj_image_cmptparm_t, 3> component = {};
     for (unsigned c = 0; c < components; ++c) {
@@ -48,7 +47,7 @@ static std::vector<Uint8> encode(const std::array<OPJ_INT32, 4>& values,
     std::vector<Uint8> encoded(65536);
     DecodeData output(encoded.data(), encoded.size());
     opj_stream_t* stream = opj_stream_create_memory_stream(&output, 4096, false);
-    opj_codec_t* codec = opj_create_compress(OPJ_CODEC_J2K);
+    opj_codec_t* codec = opj_create_compress(jp2 ? OPJ_CODEC_JP2 : OPJ_CODEC_J2K);
     const bool ok = stream && codec &&
         opj_setup_encoder(codec, &parameters, image) &&
         opj_start_compress(codec, image, stream) &&
@@ -62,7 +61,8 @@ static std::vector<Uint8> encode(const std::array<OPJ_INT32, 4>& values,
     return encoded;
 }
 
-static void check(unsigned allocated, unsigned stored, bool isSigned)
+static void check(unsigned allocated, unsigned stored, bool isSigned,
+    const char* pi = "MONOCHROME2")
 {
     const int low = isSigned ? -(1 << (stored - 1)) : 0;
     const int high = isSigned ? (1 << (stored - 1)) - 1 : (1 << stored) - 1;
@@ -77,7 +77,7 @@ static void check(unsigned allocated, unsigned stored, bool isSigned)
     dataset.putAndInsertUint16(DCM_BitsStored, stored);
     dataset.putAndInsertUint16(DCM_HighBit, stored - 1);
     dataset.putAndInsertUint16(DCM_PixelRepresentation, isSigned ? 1 : 0);
-    dataset.putAndInsertString(DCM_PhotometricInterpretation, "MONOCHROME2");
+    dataset.putAndInsertString(DCM_PhotometricInterpretation, pi);
     dataset.putAndInsertString(DCM_NumberOfFrames, "2");
 
     DcmPixelSequence sequence(DCM_PixelSequenceTag);
@@ -109,6 +109,8 @@ static void check(unsigned allocated, unsigned stored, bool isSigned)
     auto* bytes = reinterpret_cast<Uint8*>(buffer.data());
     Uint32 fragment = 1;
     OFString color;
+    require(decoder.determineDecompressedColorModel(nullptr, &sequence, &parameters,
+        &dataset, color).good() && color == pi, "Incorrect predicted grayscale/palette model");
     require(decoder.decodeFrame(nullptr, &sequence, &parameters, &dataset, 0,
         fragment, buffer.data(), frameSize - 1, color).bad(), "Short buffer accepted");
     require(fragment == 1, "Short-buffer failure consumed a fragment");
@@ -148,7 +150,7 @@ static void check(unsigned allocated, unsigned stored, bool isSigned)
 
 static void checkUnsupportedRGBContainer()
 {
-    const auto encoded = encode({0, 1, 127, 255}, 8, false, 3);
+    const auto encoded = encode({0, 1, 127, 255}, 8, false, 3, true);
     DcmDataset dataset;
     dataset.putAndInsertUint16(DCM_Rows, 2);
     dataset.putAndInsertUint16(DCM_Columns, 2);
@@ -171,10 +173,55 @@ static void checkUnsupportedRGBContainer()
     Uint32 fragment = 1;
     OFString color;
     require(decoder.decodeFrame(nullptr, &sequence, &parameters, &dataset, 0,
-        fragment, buffer.data(), sizeof(buffer), color) == EC_J2KUnsupportedBitDepth,
+        fragment, buffer.data(), sizeof(buffer), color).bad(),
         "Unsupported word-sized RGB output must be rejected");
     for (Uint16 value : buffer) require(value == 0xAAAA, "Rejected RGB wrote output");
     require(fragment == 1, "Rejected RGB consumed a fragment");
+}
+
+// Exercise the post-decode precision rejection that previously leaked the
+// assembled compressed frame. This verifies error handling, not leak accounting;
+// a sanitizer/heap checker can additionally observe these repeated calls.
+static void checkUnsupportedGrayscalePrecision()
+{
+    const auto encoded = encode({0, 1, 65535, 131071}, 17, false);
+    DcmDataset dataset;
+    dataset.putAndInsertUint16(DCM_Rows, 2);
+    dataset.putAndInsertUint16(DCM_Columns, 2);
+    dataset.putAndInsertUint16(DCM_SamplesPerPixel, 1);
+    dataset.putAndInsertUint16(DCM_BitsAllocated, 16);
+    dataset.putAndInsertUint16(DCM_BitsStored, 16);
+    dataset.putAndInsertUint16(DCM_HighBit, 15);
+    dataset.putAndInsertUint16(DCM_PixelRepresentation, 0);
+    dataset.putAndInsertString(DCM_PhotometricInterpretation, "MONOCHROME2");
+    DcmPixelSequence sequence(DCM_PixelSequenceTag);
+    sequence.insert(new DcmPixelItem(DCM_PixelItemTag));
+    auto* item = new DcmPixelItem(DCM_PixelItemTag);
+    require(item->putUint8Array(encoded.data(), encoded.size()).good(), "17-bit fragment");
+    sequence.insert(item);
+    DJPEG2KDecoder decoder;
+    DJPEG2KCodecParameter parameters;
+    for (unsigned attempt = 0; attempt < 8; ++attempt) {
+        OFString color;
+        require(decoder.determineDecompressedColorModel(nullptr, &sequence, &parameters,
+            &dataset, color).bad(), "17-bit model query succeeded");
+        std::array<Uint16, 4> buffer;
+        buffer.fill(0xAAAA);
+        Uint32 fragment = 1;
+        require(decoder.decodeFrame(nullptr, &sequence, &parameters, &dataset, 0,
+            fragment, buffer.data(), sizeof(buffer), color).bad(), "17-bit frame succeeded");
+        for (Uint16 value : buffer) require(value == 0xAAAA, "Rejected 17-bit frame wrote output");
+        DcmPolymorphOBOW output(DCM_PixelData);
+        DcmStack stack;
+        stack.push(&dataset);
+        stack.push(&output);
+        require(decoder.decode(nullptr, &sequence, output, &parameters, stack).bad(),
+            "17-bit full decode succeeded");
+    }
+    Uint16 allocated = 0, stored = 0;
+    dataset.findAndGetUint16(DCM_BitsAllocated, allocated);
+    dataset.findAndGetUint16(DCM_BitsStored, stored);
+    require(allocated == 16 && stored == 16, "Rejected 17-bit input changed bit-depth metadata");
 }
 
 int main()
@@ -186,7 +233,10 @@ int main()
             check(16, 12, isSigned);
             check(16, 16, isSigned);
         }
+        check(8, 8, false, "MONOCHROME1");
+        check(8, 8, false, "PALETTE COLOR");
         checkUnsupportedRGBContainer();
+        checkUnsupportedGrayscalePrecision();
         DJPEG2KDecoder decoder;
         for (unsigned allocated : {0, 1, 7, 12, 24, 32})
             require(decoder.decodedBitsAllocated(allocated, 1) == 0,

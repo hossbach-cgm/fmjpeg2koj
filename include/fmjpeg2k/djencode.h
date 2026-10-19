@@ -18,6 +18,7 @@
 #ifndef FMJPEG2K_DJENCODE_H
 #define FMJPEG2K_DJENCODE_H
 
+#include "cxx_config.h"
 #include "dcmtk/config/osconfig.h"
 #include "dcmtk/ofstd/oftypes.h"  /* for OFBool */
 #include "djlsutil.h"
