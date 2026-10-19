@@ -53,7 +53,6 @@ if(WIN32)
 endif()
 
 ADD_EXECUTABLE(dcmcjp2k dcmcjp2k.cc)
-set_property(TARGET dcmcjp2k PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 TARGET_LINK_LIBRARIES(dcmcjp2k
 	DCMTK::DCMTK
 	${OPENJPEG_LIBRARIES}
@@ -61,7 +60,6 @@ TARGET_LINK_LIBRARIES(dcmcjp2k
 	)
 
 ADD_EXECUTABLE(dcmdjp2k dcmdjp2k.cc)
-set_property(TARGET dcmdjp2k PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 TARGET_LINK_LIBRARIES(dcmdjp2k
 	DCMTK::DCMTK
 	${OPENJPEG_LIBRARIES}
@@ -71,7 +69,6 @@ TARGET_LINK_LIBRARIES(dcmdjp2k
 
 add_library(fmjpeg2k ${fmjpeg2k_SRCS})
 set(fmjpeg2k_LIBRARY_NAME fmjpeg2k)
-set_property(TARGET fmjpeg2k PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 TARGET_LINK_LIBRARIES(fmjpeg2k
 	DCMTK::DCMTK
 	${OPENJPEG_LIBRARIES}
@@ -80,7 +77,6 @@ TARGET_LINK_LIBRARIES(fmjpeg2k
 include(CTest)
 if(BUILD_TESTING)
   add_executable(test_decode_sample_width tests/decode_sample_width.cc)
-  set_property(TARGET test_decode_sample_width PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
   target_link_libraries(test_decode_sample_width PRIVATE fmjpeg2k)
   add_test(NAME decode_sample_width COMMAND test_decode_sample_width)
 endif()
